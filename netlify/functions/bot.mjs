@@ -31,16 +31,24 @@ bot.setMyCommands(commands).then(() => {
 export default async function handler(req, res) {
 
   if (req.method !== 'POST') {
-    return res.status(405).send('Method Not Allowed');
-  }
+    return new Response(JSON.stringify({ message: "SucMethod not allowed" }), {
+      status: 405,
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });  }
 
   try {
     const update = req.body;
     const msg = update.message;
 
     if (!msg || (msg.chat.type !== 'group' && msg.chat.type !== 'supergroup')) {
-      return res.status(200).send('OK');
-    }
+      return new Response(JSON.stringify({ message: "Success" }), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      });    }
 
     const chatId = msg.chat.id;
     const userId = msg.from.id;
@@ -291,10 +299,20 @@ if (text === '/help' || text === '/help@tagallesisbabot') {
 
     }
 
-    return res.status(200).send('OK');
+    return new Response(JSON.stringify({ message: "Success" }), {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
   } catch (error) {
     //also send a message to the chat
     console.error('Error processing webhook:', error);
-    return res.status(500).send('Error');
+    return new Response(JSON.stringify({ message: "error" }), {
+      status: 500,
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
   }
 }
