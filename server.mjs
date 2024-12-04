@@ -40,41 +40,8 @@ app.post('/webhook', (req, res, next) => {
   handler(req, res, next); // Use your existing handler
 });
 
-// Endpoint to hard reset the server
-app.get('/reset', async (req, res) => {
-  if (isResetting) {
-    return res.json({ message: 'Reset is already in progress.' });
-  }
-  console.time('Reset Time');
-  isResetting = true;
-
-  // Abort all ongoing requests
-  for (const [, controller] of ongoingRequests) {
-    controller.abort();
-  }
-  ongoingRequests.clear();
-
-  // Force-close all open connections
-  for (const socket of connections) {
-    socket.destroy();
-  }
-  connections.clear();
-
-  // Close the server
-  await new Promise((resolve) => {
-    server.close(() => {
-      console.log('Server has been shut down.');
-      resolve();
-    });
-  });
-
-  // Restart the server
-  server = app.listen(port, () => {
-    console.log(`Server restarted on port ${port}`);
-    isResetting = false;
-    console.timeEnd('Reset Time');
-    res.json({ message: 'Server has been hard reset and restarted.' });
-  });
+app.get('/', (req, res) => {
+  res.send('Server is running');
 });
 
 // Track active connections for forced shutdown
