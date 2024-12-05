@@ -311,7 +311,7 @@ if (text === '/help' || text === '/help@tagallesisbabot') {
   } catch (error) {
     //also send a message to the chat
     console.error('Error processing webhook:', error);
-    return new Response(JSON.stringify({ message: "error" }), {
+     return new Response(JSON.stringify({ message: "error is that :::", error }), {
       status: 500,
       headers: {
         'Content-Type': 'application/json'
