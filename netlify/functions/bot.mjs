@@ -296,12 +296,7 @@ if (text === '/help' || text === '/help@tagallesisbabot') {
 
     }
 
-    return new Response(JSON.stringify({ message: "Success" }), {
-      status: 200,
-      headers: {
-        'Content-Type': 'application/json'
-      }
-    });
+    return res.status(200).send('OK');
   } catch (error) {
     //also send a message to the chat
     console.error('Error processing webhook:', error);
