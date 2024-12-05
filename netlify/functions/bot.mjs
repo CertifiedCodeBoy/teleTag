@@ -90,6 +90,7 @@ export default async function handler(req, res) {
 
       if (text === '/showmembers' || text === '/showmembers@tagallesisbabot') {
         try {
+          console.log("hhhhhhhhhhhhhhhhhh");
           const membersList = [];
           for (const memberId of currentChatMembers) {
             try {
