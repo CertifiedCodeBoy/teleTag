@@ -43,12 +43,8 @@ export default async function handler(req, res) {
     const msg = update.message;
 
     if (!msg || (msg.chat.type !== 'group' && msg.chat.type !== 'supergroup')) {
-      return new Response(JSON.stringify({ message: "Success" }), {
-        status: 200,
-        headers: {
-          'Content-Type': 'application/json'
-        }
-      });    }
+      return;    
+    }
 
     const chatId = msg.chat.id;
     const userId = msg.from.id;
