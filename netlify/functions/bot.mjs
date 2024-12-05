@@ -1,5 +1,6 @@
 import TelegramBot from 'node-telegram-bot-api';
 import dotenv from 'dotenv';
+import express from 'express';
 
 const groupMembers = new Map();
 const mentionAllCooldowns = new Map();
@@ -7,6 +8,7 @@ const helpers = new Map();
 const helpCooldown = new Map();
 
 dotenv.config();
+const app = express();
 
 const bot = new TelegramBot(process.env.TOKEN);
 
@@ -28,12 +30,13 @@ bot.setMyCommands(commands).then(() => {
   console.error('Error setting bot commands:', error);
 });
 
+app.post('/webhook', handler);
+
 export default async function handler(req, res) {
 
   if (req.method !== 'POST') {
-        return res.status(405).json({ message: "Method not allowed" });
-     }
-
+    return res.status(405).json({ message: "Method not allowed" });
+  }
   try {
     const update = req.body;
     const msg = update.message;
@@ -45,15 +48,14 @@ export default async function handler(req, res) {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
 
-
-  if (!groupMembers.has(chatId)) {
-    groupMembers.set(chatId, new Set());
-  }
-  if (!helpers.has(chatId)) {
-    helpers.set(chatId, new Set());
-  }
-  const currentChatMembers = groupMembers.get(chatId);
-  const currentHelpers = helpers.get(chatId);
+    if (!groupMembers.has(chatId)) {
+      groupMembers.set(chatId, new Set());
+    }
+    if (!helpers.has(chatId)) {
+      helpers.set(chatId, new Set());
+    }
+    const currentChatMembers = groupMembers.get(chatId);
+    const currentHelpers = helpers.get(chatId);
 
 
 
@@ -71,7 +73,7 @@ export default async function handler(req, res) {
     }
 
 
-    if (msg.text) {
+  if (msg.text) {
       const text = msg.text;
 
       if (text === '/join' || text === '/join@tagallesisbabot') {
@@ -293,13 +295,12 @@ if (text === '/help' || text === '/help@tagallesisbabot') {
     console.log('Webhook processed successfully');
     return res.status(200).json({ message: "Success" });
   } catch (error) {
-    //also send a message to the chat
     console.error('Error processing webhook:', error);
-    return new Response(JSON.stringify({ message: "error is that :::", error }), {
-      status: 500,
-      headers: {
-        'Content-Type': 'application/json'
-      }
-    });
+    return res.status(500).json({ message: "Error processing webhook", error });
   }
 }
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
+});
