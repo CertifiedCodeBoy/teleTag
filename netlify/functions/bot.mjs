@@ -43,12 +43,8 @@ export default async function handler(req, res) {
     const msg = update.message;
 
     if (!msg || (msg.chat.type !== 'group' && msg.chat.type !== 'supergroup')) {
-      return new Response(JSON.stringify({ message: "Success" }), {
-        status: 200,
-        headers: {
-          'Content-Type': 'application/json'
-        }
-      });    }
+      return;
+    }
 
     const chatId = msg.chat.id;
     const userId = msg.from.id;
@@ -301,6 +297,7 @@ if (text === '/help' || text === '/help@tagallesisbabot') {
 
     return new Response(JSON.stringify({ message: "Success" }), {
       status: 200,
+      ok: true,
       headers: {
         'Content-Type': 'application/json'
       }
@@ -308,7 +305,7 @@ if (text === '/help' || text === '/help@tagallesisbabot') {
   } catch (error) {
     //also send a message to the chat
     console.error('Error processing webhook:', error);
-    return new Response(JSON.stringify({ message: "error" }), {
+    return new Response(JSON.stringify({ message: "error is that :::", error }), {
       status: 500,
       headers: {
         'Content-Type': 'application/json'
