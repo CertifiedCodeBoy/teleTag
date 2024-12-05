@@ -32,12 +32,15 @@ export default async function handler(req, res) {
 
   if (req.method !== 'POST') {
 if (req.method == 'GET') {
+  console.log("this is a get and now we are done processing"); 
     return new Response(JSON.stringify({ message: "hiiiiiiiii" }), {
       status: 200,
       headers: {
         'Content-Type': 'application/json'
       }
-    });  } else {
+    });  
+  console.log("this is after return so we wont read it probably"); 
+} else {
     return new Response(JSON.stringify({ message: "SucMethod not allowed" }), {
       status: 405,
       headers: {
@@ -51,7 +54,7 @@ if (req.method == 'GET') {
     const msg = update.message;
 
     if (!msg || (msg.chat.type !== 'group' && msg.chat.type !== 'supergroup')) {
-      return;    
+        return res.status(405).send('not a group !');
     }
 
     const chatId = msg.chat.id;
@@ -109,7 +112,6 @@ if (req.method == 'GET') {
                return res.status(200).send('OK');
             } catch (error) {
               console.error(`Failed to get member info for user ID ${memberId}: ${error.message}`);
-               return res.status(200).send('OK');
             }
           }
 
