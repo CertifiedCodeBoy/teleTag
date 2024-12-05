@@ -43,7 +43,7 @@ export default async function handler(req, res) {
     const update = req.body;
     const msg = update.message;
 
-    console.log("this is the body ::: ",JSON.stringify(req));
+    console.log("this is the body ::: ",req);
 
     if (!msg || (msg.chat.type !== 'group' && msg.chat.type !== 'supergroup')) {
         return new Response(JSON.stringify({ message: "not a group !" }), {
