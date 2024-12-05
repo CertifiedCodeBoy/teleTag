@@ -9,6 +9,7 @@ const helpCooldown = new Map();
 
 dotenv.config();
 const app = express();
+app.use(express.json());
 
 const bot = new TelegramBot(process.env.TOKEN);
 
