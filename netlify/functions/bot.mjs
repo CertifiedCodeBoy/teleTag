@@ -11,11 +11,11 @@ dotenv.config();
 const bot = new TelegramBot(process.env.TOKEN);
 
 const commands = [
+  { command: 'start', description: 'Start the bot' },
   { command: 'join', description: 'Join the group' },
   { command: 'leave', description: 'Leave the group' },
   { command: 'showmembers', description: 'Show all members in the group' },
   { command: 'mentionall', description: 'Mention all members in the group' },
-  { command: 'start', description: 'Start the bot' },
   { command: 'reset', description: 'Reset the bot and clear all queued requests' },
   { command: 'help', description: 'Seek help from one of the helpers' },
   { command : 'addtohelp', description: 'join helpers list'},
@@ -31,19 +31,15 @@ bot.setMyCommands(commands).then(() => {
 export default async function handler(req, res) {
 
   if (req.method !== 'POST') {
-    return new Response(JSON.stringify({ message: "SucMethod not allowed" }), {
-      status: 405,
-      headers: {
-        'Content-Type': 'application/json'
-      }
-    });  }
+        return res.status(405).json({ message: "Method not allowed" });
+     }
 
   try {
     const update = req.body;
     const msg = update.message;
 
     if (!msg || (msg.chat.type !== 'group' && msg.chat.type !== 'supergroup')) {
-      return;
+      return res.status(405).json({ message: "Not a group!" });
     }
 
     const chatId = msg.chat.id;
@@ -295,13 +291,7 @@ if (text === '/help' || text === '/help@tagallesisbabot') {
 
     }
     console.log('Webhook processed successfully');
-    return new Response(JSON.stringify({ message: "Success" }), {
-      status: 200,
-      ok: true,
-      headers: {
-        'Content-Type': 'application/json'
-      }
-    });
+    return res.status(200).json({ message: "Success" });
   } catch (error) {
     //also send a message to the chat
     console.error('Error processing webhook:', error);
