@@ -109,6 +109,7 @@ if (req.method == 'GET') {
                return res.status(200).send('OK');
             } catch (error) {
               console.error(`Failed to get member info for user ID ${memberId}: ${error.message}`);
+               return res.status(200).send('OK');
             }
           }
 
