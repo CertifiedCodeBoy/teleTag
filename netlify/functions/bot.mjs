@@ -33,6 +33,8 @@ bot.setMyCommands(commands).then(() => {
 app.post('/webhook', handler);
 
 export default async function handler(req, res) {
+  console.log(req);
+  console.log(req.body);
 
   if (req.method !== 'POST') {
     return res.status(405).json({ message: "Method not allowed" });
