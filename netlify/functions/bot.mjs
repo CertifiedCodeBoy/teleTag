@@ -31,19 +31,19 @@ bot.setMyCommands(commands).then(() => {
 export default async function handler(req, res) {
 
   if (req.method !== 'POST') {
-    return new Response(JSON.stringify({ message: "SucMethod not allowed" }), {
-      status: 405,
-      headers: {
-        'Content-Type': 'application/json'
-      }
-    });  }
 if (req.method == 'GET') {
     return new Response(JSON.stringify({ message: "hiiiiiiiii" }), {
       status: 200,
       headers: {
         'Content-Type': 'application/json'
       }
-    });  }
+    });  } else {
+    return new Response(JSON.stringify({ message: "SucMethod not allowed" }), {
+      status: 405,
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    }); } }
   
 
   try {
