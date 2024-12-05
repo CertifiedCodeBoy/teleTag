@@ -294,7 +294,7 @@ if (text === '/help' || text === '/help@tagallesisbabot') {
       }
 
     }
-
+    console.log('Webhook processed successfully');
     return new Response(JSON.stringify({ message: "Success" }), {
       status: 200,
       ok: true,
