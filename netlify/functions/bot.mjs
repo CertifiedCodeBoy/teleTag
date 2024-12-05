@@ -37,6 +37,14 @@ export default async function handler(req, res) {
         'Content-Type': 'application/json'
       }
     });  }
+if (req.method == 'GET') {
+    return new Response(JSON.stringify({ message: "hiiiiiiiii" }), {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });  }
+  
 
   try {
     const update = req.body;
@@ -90,7 +98,6 @@ export default async function handler(req, res) {
 
       if (text === '/showmembers' || text === '/showmembers@tagallesisbabot') {
         try {
-          console.log("hhhhhhhhhhhhhhhhhh");
           const membersList = [];
           for (const memberId of currentChatMembers) {
             try {
@@ -99,6 +106,7 @@ export default async function handler(req, res) {
               membersList.push(user.username
                 ? `${user.username}`
                 : `${user.first_name} ${user.last_name || ''}`);
+               return res.status(200).send('OK');
             } catch (error) {
               console.error(`Failed to get member info for user ID ${memberId}: ${error.message}`);
             }
