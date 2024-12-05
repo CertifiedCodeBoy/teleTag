@@ -54,10 +54,9 @@ if (req.method == 'GET') {
     const update = req.body;
     const msg = update.message;
 
-    console.log(update);
+    console.log(req);
 
     if (!msg || (msg.chat.type !== 'group' && msg.chat.type !== 'supergroup')) {
-      console.log(msg);
         return new Response(JSON.stringify({ message: "not a group !" }), {
       status: 405,
       headers: {
