@@ -31,30 +31,19 @@ bot.setMyCommands(commands).then(() => {
 export default async function handler(req, res) {
 
   if (req.method !== 'POST') {
-if (req.method == 'GET') {
-  console.log("this is a get and now we are done processing"); 
-    return new Response(JSON.stringify({ message: "hiiiiiiiii" }), {
-      status: 200,
-      ok:true,
-      headers: {
-        'Content-Type': 'application/json'
-      }
-    });  
-  console.log("this is after return so we wont read it probably"); 
-} else {
     return new Response(JSON.stringify({ message: "SucMethod not allowed" }), {
       status: 405,
       headers: {
         'Content-Type': 'application/json'
       }
-    }); } }
+    }); } 
   
 
   try {
     const update = req.body;
     const msg = update.message;
 
-    console.log("this is the body ::: ",JSON.stringify(req.body));
+    console.log("this is the body ::: ",JSON.stringify(req));
 
     if (!msg || (msg.chat.type !== 'group' && msg.chat.type !== 'supergroup')) {
         return new Response(JSON.stringify({ message: "not a group !" }), {
