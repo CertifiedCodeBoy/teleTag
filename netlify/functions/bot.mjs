@@ -35,6 +35,7 @@ if (req.method == 'GET') {
   console.log("this is a get and now we are done processing"); 
     return new Response(JSON.stringify({ message: "hiiiiiiiii" }), {
       status: 200,
+      ok:true,
       headers: {
         'Content-Type': 'application/json'
       }
@@ -54,7 +55,12 @@ if (req.method == 'GET') {
     const msg = update.message;
 
     if (!msg || (msg.chat.type !== 'group' && msg.chat.type !== 'supergroup')) {
-        return res.status(405).send('not a group !');
+        return new Response(JSON.stringify({ message: "not a group !" }), {
+      status: 405,
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
     }
 
     const chatId = msg.chat.id;
@@ -109,7 +115,6 @@ if (req.method == 'GET') {
               membersList.push(user.username
                 ? `${user.username}`
                 : `${user.first_name} ${user.last_name || ''}`);
-               return res.status(200).send('OK');
             } catch (error) {
               console.error(`Failed to get member info for user ID ${memberId}: ${error.message}`);
             }
@@ -306,8 +311,15 @@ if (text === '/help' || text === '/help@tagallesisbabot') {
       }
 
     }
+    
+return new Response(JSON.stringify({ message: "Success" }), {
+      status: 200,
+      ok: true,
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
 
-    return res.status(200).send('OK');
   } catch (error) {
     //also send a message to the chat
     console.error('Error processing webhook:', error);
