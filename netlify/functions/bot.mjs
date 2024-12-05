@@ -54,7 +54,7 @@ if (req.method == 'GET') {
     const update = req.body;
     const msg = update.message;
 
-    console.log(req.body.source);
+    console.log("this is the body ::: ",JSON.stringify(req.body));
 
     if (!msg || (msg.chat.type !== 'group' && msg.chat.type !== 'supergroup')) {
         return new Response(JSON.stringify({ message: "not a group !" }), {
