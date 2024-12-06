@@ -52,17 +52,13 @@ async function readStream(stream) {
 // Function handler
 export default async function handler(event) {
   try {
-    console.log('Raw event:', event);
-
     let bodyString;
     if (event.body instanceof ReadableStream) {
       bodyString = await readStream(event.body);
     } else {
       bodyString = event.body;
     }
-
-    console.log('Raw body string:', bodyString);
-
+    
     let body;
     try {
       body = JSON.parse(bodyString);
@@ -73,8 +69,6 @@ export default async function handler(event) {
         { status: 400, headers: { 'Content-Type': 'application/json' } }
       );
     }
-
-    console.log('Parsed body:', body);
 
     const msg = body.message;
     if (!msg || !msg.text) {
@@ -331,8 +325,8 @@ if (text === '/help' || text === '/help@tagallesisbabot') {
       }
 
     }
-    console.log('Webhook processed successfully');
-    return new Response(
+
+      return new Response(
       JSON.stringify({ message: 'Message processed successfully' }),
       {
         status: 200,
