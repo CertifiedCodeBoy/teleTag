@@ -1,6 +1,6 @@
 import TelegramBot from 'node-telegram-bot-api';
 import dotenv from 'dotenv';
-import express from 'express';
+
 
 const groupMembers = new Map();
 const mentionAllCooldowns = new Map();
@@ -8,8 +8,7 @@ const helpers = new Map();
 const helpCooldown = new Map();
 
 dotenv.config();
-const app = express();
-app.use(express.json());
+
 
 const bot = new TelegramBot(process.env.TOKEN);
 
@@ -31,22 +30,58 @@ bot.setMyCommands(commands).then(() => {
   console.error('Error setting bot commands:', error);
 });
 
-app.post('/webhook', handler);
 
-export default async function handler(req, res) {
-  console.log(req);
-  console.log(req.body);
-  console.log(req.headers);
 
-  if (req.method !== 'POST') {
-    return res.status(405).json({ message: "Method not allowed" });
+
+/**
+ * Helper function to parse the request body
+ */
+async function readStream(stream) {
+  const reader = stream.getReader();
+  const chunks = [];
+  let done = false;
+
+  while (!done) {
+    const { value, done: readerDone } = await reader.read();
+    if (value) chunks.push(value);
+    done = readerDone;
   }
-  try {
-    const update = req.body;
-    const msg = update.message;
 
-    if (!msg || (msg.chat.type !== 'group' && msg.chat.type !== 'supergroup')) {
-      return res.status(405).json({ message: "Not a group!" });
+  return new TextDecoder().decode(Buffer.concat(chunks));
+}
+// Function handler
+export default async function handler(event) {
+  try {
+    console.log('Raw event:', event);
+
+    let bodyString;
+    if (event.body instanceof ReadableStream) {
+      bodyString = await readStream(event.body);
+    } else {
+      bodyString = event.body;
+    }
+
+    console.log('Raw body string:', bodyString);
+
+    let body;
+    try {
+      body = JSON.parse(bodyString);
+    } catch (error) {
+      console.error('Error parsing JSON:', error.message);
+      return new Response(
+        JSON.stringify({ message: 'Invalid JSON in request body' }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+
+    console.log('Parsed body:', body);
+
+    const msg = body.message;
+    if (!msg || !msg.text) {
+      return new Response(
+        JSON.stringify({ message: 'No message or text to process' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      );
     }
 
     const chatId = msg.chat.id;
@@ -297,14 +332,25 @@ if (text === '/help' || text === '/help@tagallesisbabot') {
 
     }
     console.log('Webhook processed successfully');
-    return res.status(200).json({ message: "Success" });
+    return new Response(
+      JSON.stringify({ message: 'Message processed successfully' }),
+      {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
   } catch (error) {
-    console.error('Error processing webhook:', error);
-    return res.status(500).json({ message: "Error processing webhook", error });
-  }
-}
+    console.error('Error:', error);
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-});
+    // Return error response
+    return new Response(
+      JSON.stringify({
+        message: 'Internal Server Error',
+        error: error.message,
+      }),
+      {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
+  }}
