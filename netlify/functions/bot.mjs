@@ -1,16 +1,39 @@
 import TelegramBot from 'node-telegram-bot-api';
 import dotenv from 'dotenv';
-
-
-const groupMembers = new Map();
-const mentionAllCooldowns = new Map();
-const helpers = new Map();
-const helpCooldown = new Map();
+import { MongoClient } from 'mongodb';
 
 dotenv.config();
 
-
 const bot = new TelegramBot(process.env.TOKEN);
+
+// MongoDB Setup
+const mongoClient = new MongoClient(process.env.MONGO_URI); // Replace with your MongoDB URI
+let db;
+
+async function connectToDatabase() {
+  if (!db) {
+    try{ mongoClient.connect();
+    db = mongoClient.db('teleTag'); // Database name
+    console.log('Connected to MongoDB');
+  } catch(err) {
+    console.error('Error connecting to MongoDB', err);
+  } }
+}
+
+async function exampleFunction() {
+  await connectToDatabase();
+}
+
+exampleFunction();
+
+const membersCollection = () => {
+  if (!db) throw new Error('Database not initialized');
+  return db.collection('groupMembers');
+};
+const helpersCollection = () => {
+  if (!db) throw new Error('Database not initialized');
+  return db.collection('helpers');
+};
 
 const commands = [
   { command: 'start', description: 'Start the bot' },
@@ -18,10 +41,11 @@ const commands = [
   { command: 'leave', description: 'Leave the group' },
   { command: 'showmembers', description: 'Show all members in the group' },
   { command: 'mentionall', description: 'Mention all members in the group' },
-  { command: 'reset', description: 'Reset the bot and clear all queued requests' },
   { command: 'help', description: 'Seek help from one of the helpers' },
-  { command : 'addtohelp', description: 'join helpers list'},
-  { command: 'showhelpers', description: 'Show all helpers in the group' }
+  { command: 'addtohelp', description: 'Join helpers list' },
+  { command: 'showhelpers', description: 'Show all helpers in the group' },
+  { command: 'leavehelpers', description: 'Leave the helpers' },
+  { command: 'reset', description: 'Reset the bot and clear all queued requests' },
 ];
 
 bot.setMyCommands(commands).then(() => {
@@ -30,12 +54,37 @@ bot.setMyCommands(commands).then(() => {
   console.error('Error setting bot commands:', error);
 });
 
+// Helper Functions
+async function getGroupMembers(chatId) {
+  const groupData = await membersCollection().findOne({ chatId });
+  return groupData || { chatId, members: [] };
+}
 
+async function updateGroupMembers(chatId, members) {
+  return membersCollection().updateOne(
+    { chatId },
+    { $set: { members } },
+    { upsert: true }
+  );
+}
 
+async function getHelpers(chatId) {
+  const helpersData = await helpersCollection().findOne({ chatId });
+  return helpersData || { chatId, helpers: [] };
+}
 
-/**
- * Helper function to parse the request body
- */
+async function updateHelpers(chatId, helpers) {
+  return helpersCollection().updateOne(
+    { chatId },
+    { $set: { helpers } },
+    { upsert: true }
+  );
+}
+
+// Utility function to escape Markdown characters
+// function escapeMarkdown(text) {
+//   return text.replace(/[_*\[\]()~`>#+\-=|{}.!]/g, '\\$&'); // Escapes special Markdown characters
+// }
 async function readStream(stream) {
   const reader = stream.getReader();
   const chunks = [];
@@ -49,8 +98,8 @@ async function readStream(stream) {
 
   return new TextDecoder().decode(Buffer.concat(chunks));
 }
-// Function handler
-export default async function handler(event) {
+// Handle Updates
+export default async function handler(event,res) {
   try {
     let bodyString;
     if (event.body instanceof ReadableStream) {
@@ -58,293 +107,137 @@ export default async function handler(event) {
     } else {
       bodyString = event.body;
     }
-    
-    let body;
-    try {
-      body = JSON.parse(bodyString);
-    } catch (error) {
-      console.error('Error parsing JSON:', error.message);
-      return new Response(
-        JSON.stringify({ message: 'Invalid JSON in request body' }),
-        { status: 400, headers: { 'Content-Type': 'application/json' } }
-      );
-    }
 
+    const body = JSON.parse(bodyString);
+    // const body = bodyString;
     const msg = body.message;
     if (!msg || !msg.text) {
       return new Response(
         JSON.stringify({ message: 'No message or text to process' }),
         { status: 200, headers: { 'Content-Type': 'application/json' } }
-      );
-    }
+        );
+      }
 
     const chatId = msg.chat.id;
     const userId = msg.from.id;
 
-    if (!groupMembers.has(chatId)) {
-      groupMembers.set(chatId, new Set());
-    }
-    if (!helpers.has(chatId)) {
-      helpers.set(chatId, new Set());
-    }
-    const currentChatMembers = groupMembers.get(chatId);
-    const currentHelpers = helpers.get(chatId);
+    // Handle Commands
+    const text = msg.text;
 
-
-
-    if (msg.new_chat_members) {
-      msg.new_chat_members.forEach((member) => {
-        bot.sendMessage(chatId, `${member.first_name} Have joined the Chat !`);
-        currentChatMembers.add(member.id);
-      });
-    }
-
-
-    if (msg.left_chat_member) {
-      bot.sendMessage(chatId, `${msg.left_chat_member.first_name} Have left the Chat !`);
-      currentChatMembers.delete(msg.left_chat_member.id);
-    }
-
-
-  if (msg.text) {
-      const text = msg.text;
-
-      if (text === '/join' || text === '/join@tagallesisbabot') {
-        currentChatMembers.add(userId);
+    if (text === '/join' || text === '/join@tagallesisbabot') {
+      const groupData = await getGroupMembers(chatId);
+      const user = { id: userId, first_name: msg.from.first_name };
+    
+      if (!groupData.members.some(member => member.id === userId)) {
+        groupData.members.push(user);
+        await updateGroupMembers(chatId, groupData.members);
         await bot.sendMessage(chatId, 'You have joined the group!');
-      }
-
-      if (text === '/leave' || text === '/leave@tagallesisbabot') {
-        currentChatMembers.delete(userId);
-        await bot.sendMessage(chatId, 'You have left the group!');
-      }
-
-      if (text === '/showmembers' || text === '/showmembers@tagallesisbabot') {
-        try {
-          const membersList = [];
-          for (const memberId of currentChatMembers) {
-            try {
-              const member = await bot.getChatMember(chatId, memberId);
-              const user = member.user;
-              membersList.push(user.username
-                ? `${user.username}`
-                : `${user.first_name} ${user.last_name || ''}`);
-            } catch (error) {
-              console.error(`Failed to get member info for user ID ${memberId}: ${error.message}`);
-            }
-          }
-
-          const membersMessage = membersList.length > 0
-            ? membersList.join('\n')
-            : 'No members found.';
-
-          await bot.sendMessage(chatId, membersMessage);
-        } catch (error) {
-          console.error(error.message);
-        }
-      }
-
-      
- // Utility function to escape Markdown characters
-function escapeMarkdown(text) {
-  return text.replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&'); // Escapes special Markdown characters
-}
-
-// /mentionall Command
-if (text === '/mentionall' || text === '/mentionall@tagallesisbabot') {
-  const now = Date.now();
-  const userKey = `${chatId}:${msg.from.id}`; // Composite key for chat-user pair
-
-  const userCooldown = mentionAllCooldowns.get(userKey);
-
-  if (userCooldown && now < userCooldown) {
-    const remainingTime = Math.ceil((userCooldown - now) / 1000);
-    await bot.sendMessage(chatId, `Please wait ${remainingTime} seconds before using /mentionall again.`);
-    return;
-  }
-
-  // Set new cooldown
-  mentionAllCooldowns.set(userKey, now + 10000);
-
-  try {
-    const memberArray = Array.from(currentChatMembers);
-
-    if (memberArray.length > 50) {
-      await bot.sendMessage(chatId, 'Too many members to mention!');
-      return;
-    }
-
-    const mentions = [];
-    for (const memberId of memberArray) {
-      try {
-        const member = await bot.getChatMember(chatId, memberId).catch(() => null);
-
-        if (!member || !member.user) continue;
-
-        const user = member.user;
-        mentions.push(user.username
-          ? `@${escapeMarkdown(user.username)}`
-          : `[${escapeMarkdown(user.first_name)}](tg://user?id=${user.id})`);
-      } catch (error) {
-        console.error(`[DEBUG] Mention error for user ${memberId}:`, error);
+      } else {
+        await bot.sendMessage(chatId, 'You are already a member!');
       }
     }
 
-    if (mentions.length === 0) {
-      await bot.sendMessage(chatId, 'No members could be mentioned.');
-      return;
-    }
+ if (text === '/leave' || text === '/leave@tagallesisbabot') {
+  const groupData = await getGroupMembers(chatId);
+  const userIndex = groupData.members.findIndex(member => member.id === userId);
 
-    if (mentions.join(' ').length > 4096) {
-      const chunks = [];
-      let currentChunk = [];
-      let currentLength = 0;
-
-      for (const mention of mentions) {
-        if (currentLength + mention.length > 4096) {
-          chunks.push(currentChunk.join(' '));
-          currentChunk = [];
-          currentLength = 0;
-        }
-        currentChunk.push(mention);
-        currentLength += mention.length;
-      }
-
-      if (currentChunk.length > 0) {
-        chunks.push(currentChunk.join(' '));
-      }
-
-      for (const chunk of chunks) {
-        await bot.sendMessage(chatId, chunk, { parse_mode: 'Markdown' });
-      }
-    } else {
-      await bot.sendMessage(chatId, mentions.join(' '), { parse_mode: 'Markdown' });
-    }
-  } catch (error) {
-    console.error('[DEBUG] Mentioning all error:', error);
-    await bot.sendMessage(chatId, 'Failed to mention all members.');
+  if (userIndex !== -1) {
+    groupData.members.splice(userIndex, 1);
+    await updateGroupMembers(chatId, groupData.members);
+    await bot.sendMessage(chatId, 'You have left the group!');
+  } else {
+    await bot.sendMessage(chatId, 'You are not a member!');
   }
 }
 
-// /help Command
-if (text === '/help' || text === '/help@tagallesisbabot') {
-  const now = Date.now();
-  const userKey = `${chatId}:${msg.from.id}`;
-
-  const userCooldown = helpCooldown.get(userKey);
-
-  if (userCooldown && now < userCooldown) {
-    const remainingTime = Math.ceil((userCooldown - now) / 1000);
-    await bot.sendMessage(chatId, `Please wait ${remainingTime} seconds before using /help again.`);
-    return;
-  }
-
-  helpCooldown.set(userKey, now + 10000);
-
-  try {
-    const helpersArray = Array.from(currentHelpers);
-
-    if (helpersArray.length === 0) {
-      await bot.sendMessage(chatId, 'No helpers are currently available.');
-      return;
+    if (text === '/showmembers' || text === '/showmembers@tagallesisbabot') {
+      const groupData = await getGroupMembers(chatId);
+      const membersMessage = groupData.members.length
+        ? groupData.members.map(member => member.first_name).join(', ')
+        : 'No members found.';
+      await bot.sendMessage(chatId, membersMessage);
     }
 
-    const mentions = helpersArray.map(async (helperId) => {
-      try {
-        const helper = await bot.getChatMember(chatId, helperId).catch(() => null);
-        if (!helper || !helper.user) return null;
-
-        const user = helper.user;
-        return user.username
-          ? `@${escapeMarkdown(user.username)}`
-          : `[${escapeMarkdown(user.first_name)}](tg://user?id=${user.id})`;
-      } catch (error) {
-        console.error(`[DEBUG] Mention error for helper ${helperId}:`, error);
-        return null;
-      }
-    });
-
-    const resolvedMentions = (await Promise.all(mentions)).filter(Boolean);
-
-    if (resolvedMentions.length === 0) {
-      await bot.sendMessage(chatId, 'No helpers could be mentioned.');
-      return;
-    }
-
-    await bot.sendMessage(chatId, resolvedMentions.join(' '), { parse_mode: 'Markdown' });
-  } catch (error) {
-    console.error('[DEBUG] Help command error:', error);
-    await bot.sendMessage(chatId, 'Failed to mention helpers.');
-  }
-}
-
-
-      if (text === '/start' || text === '/start@tagallesisbabot') {
-        await bot.sendMessage(chatId, "Hello! Use /join to join a group.");
-      }
-
-      if (text === '/showhelpers' || text === '/showhelpers@tagallesisbabot') {
-        try {
-          const membersList = [];
-          for (const memberId of currentHelpers) {
-            try {
-              const member = await bot.getChatMember(chatId, memberId);
-              const user = member.user;
-              membersList.push(user.username
-                ? `${user.username}`
-                : `${user.first_name} ${user.last_name || ''}`);
-            } catch (error) {
-              console.error(`Failed to get member info for user ID ${memberId}: ${error.message}`);
-            }
-          }
-  
-          const membersMessage = membersList.length > 0
-            ? membersList.join('\n')
-            : 'No members found.';
-  
-          await bot.sendMessage(chatId, membersMessage);
-        } catch (error) {
-          console.error(error.message);
-        }
-      }
+    if (text === '/mentionall' || text === '/mentionall@tagallesisbabot') {
+      const groupData = await getGroupMembers(chatId);
+      const mentions = groupData.members.map(id => `[${
+        msg.from.first_name
+      }](tg://user?id=${id})`);
+      // mention by first name because it's required and always available:
     
- if (text === '/reset' || text === '/reset@tagallesisbabot') {
-        groupMembers.set(chatId, new Set());
-        helpers.set(chatId, new Set());
-        await bot.sendMessage(chatId, 'Bot has been reset and all queued requests have been cleared.');
-      }
-    
-      // Handle /addtohelp command
-      if (text === '/addtohelp' || text === '/addtohelp@tagallesisbabot') {
-        if (!currentHelpers.has(userId)) {
-          currentHelpers.add(userId);
-          await bot.sendMessage(chatId, 'You have joined the helpers!');
-        } else {
-          await bot.sendMessage(chatId, 'You are already a helper!');
-        }
-      }
-
+      const message = mentions.length
+        ? mentions.join(' ')
+        : 'No members to mention.';
+      await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
     }
 
-      return new Response(
+    if (text === '/addtohelp' || text === '/addtohelp@tagallesisbabot') {
+      const helpersData = await getHelpers(chatId);
+      const helper = { id: userId, first_name: msg.from.first_name };
+    
+      if (!helpersData.helpers.some(h => h.id === userId)) {
+        helpersData.helpers.push(helper);
+        await updateHelpers(chatId, helpersData.helpers);
+        await bot.sendMessage(chatId, 'You have joined the helpers!');
+      } else {
+        await bot.sendMessage(chatId, 'You are already a helper!');
+      }
+    }
+
+    if (text === '/showhelpers' || text === '/showhelpers@tagallesisbabot') {
+      const helpersData = await getHelpers(chatId);
+      const helpersMessage = helpersData.helpers.length
+        ? helpersData.helpers.map(helper => helper.first_name).join(', ')
+        : 'No helpers found.';
+      await bot.sendMessage(chatId, helpersMessage);
+    }
+
+    if (text === '/leavehelpers' || text === '/leavehelpers@tagallesisbabot') {
+      const helpersData = await getHelpers(chatId);
+      const userIndex = helpersData.helpers.findIndex(helper => helper.id === userId);
+    
+      if (userIndex !== -1) {
+        helpersData.helpers.splice(userIndex, 1);
+        await updateHelpers(chatId, helpersData.helpers);
+        await bot.sendMessage(chatId, 'You have left the helpers!');
+      } else {
+        await bot.sendMessage(chatId, 'You are not a helper!');
+      }
+    }
+
+    if (text === '/reset' || text === '/reset@tagallesisbabot') {
+      await updateGroupMembers(chatId, []);
+      await updateHelpers(chatId, []);
+      await bot.sendMessage(chatId, 'Bot has been reset.');
+    }
+
+   if (text === '/help' || text === '/help@tagallesisbabot') {
+  const helpersData = await getHelpers(chatId);
+  const mentions = helpersData.helpers.map(helper => `[${helper.first_name}](tg://user?id=${helper.id})`);
+  const message = mentions.length
+    ? mentions.join(' ')
+    : 'No helpers available right now.';
+  await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+}
+
+    if (text === '/start' || text === '/start@tagallesisbabot') {
+      await bot.sendMessage(chatId, 'Hello! Use /join to join the group.');
+    }
+    
+    // res.status(200).send('OK');
+    return new Response(
       JSON.stringify({ message: 'Message processed successfully' }),
-      {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
     );
   } catch (error) {
     console.error('Error:', error);
 
-    // Return error response
     return new Response(
       JSON.stringify({
         message: 'Internal Server Error',
         error: error.message,
       }),
-      {
-        status: 500,
-        headers: { 'Content-Type': 'application/json' },
-      }
+      { status: 500, headers: { 'Content-Type': 'application/json' } }
     );
-  }}
+  }
+}

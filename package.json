@@ -14,10 +14,11 @@
     "body-parser": "^1.20.3",
     "dotenv": "^16.4.5",
     "express": "^4.21.1",
+    "mongodb": "^6.11.0",
     "netlify": "^13.1.21",
     "node-telegram-bot-api": "^0.66.0"
   },
   "devDependencies": {
-    "netlify-cli": "^17.37.2"
+    "netlify-cli": "^17.38.0"
   }
 }
