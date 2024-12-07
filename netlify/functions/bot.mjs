@@ -160,10 +160,7 @@ export default async function handler(event,res) {
 
     if (text === '/mentionall' || text === '/mentionall@tagallesisbabot') {
       const groupData = await getGroupMembers(chatId);
-      const mentions = groupData.members.map(id => `[${
-        msg.from.first_name
-      }](tg://user?id=${id})`);
-      // mention by first name because it's required and always available:
+      const mentions = groupData.members.map(member => `[${member.first_name}](tg://user?id=${member.id})`);
     
       const message = mentions.length
         ? mentions.join(' ')
