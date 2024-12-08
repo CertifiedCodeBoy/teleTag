@@ -6,7 +6,7 @@ dotenv.config();
 
 const bot = new TelegramBot(process.env.TOKEN);
 
-const mongoClient = new MongoClient(process.env.MONGO_URI); 
+const mongoClient = new MongoClient(process.env.MONGO_URI);
 let db;
 
 async function connectToDatabase() {
@@ -155,7 +155,6 @@ function isValidDate(date) {
 }
 
 async function staticCommands(text, chatId, userId, msg) {
-
   if (text === "/start" || text === "/start@tagallesisbabot") {
     await bot.sendMessage(chatId, "Hello! Use /join to join the group.");
   }
@@ -290,7 +289,6 @@ async function staticCommands(text, chatId, userId, msg) {
     await updateReminders(chatId, []);
     await bot.sendMessage(chatId, "Bot has been reset.");
   }
-
 }
 
 export default async function handler(event, res) {
@@ -314,9 +312,36 @@ export default async function handler(event, res) {
 
     // Handle Commands
     const text = msg.text;
-    
 
     await staticCommands(text, chatId, userId, msg);
+
+    if (new Date().getHours() === 15 && new Date().getMinutes() === 33) {
+      const remindersData = await getReminders(chatId);
+      const remindersMessage = remindersData.reminders.length
+        ? remindersData.reminders
+            .map(
+              (reminder, index) =>
+                `${index + 1}. ${reminder.text} - ${new Date(
+                  reminder.date
+                ).toLocaleDateString("fr-dz", {
+                  weekday: "long",
+                  day: "numeric",
+                  month: "long",
+                  year: "numeric",
+                })}`
+            )
+            .join("\n")
+        : "No reminders found.";
+
+      await bot.sendMessage(chatId, remindersMessage);
+
+      const currentDate = new Date();
+      const updatedReminders = remindersData.reminders.filter(
+        (reminder) => new Date(reminder.date) > currentDate
+      );
+
+      await updateReminders(chatId, updatedReminders);
+    }
 
     // clear a specific reminder by index
     if (
