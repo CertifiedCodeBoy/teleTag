@@ -41,20 +41,18 @@ const remindersCollection = () => {
 };
 
 const commands = [
-  { command: "start", description: "Start the bot" },
+  { command: "mentionall", description: "Mention all members in the group" },
   { command: "join", description: "Join the group" },
   { command: "leave", description: "Leave the group" },
   { command: "showmembers", description: "Show all members in the group" },
-  { command: "mentionall", description: "Mention all members in the group" },
   { command: "help", description: "Seek help from one of the helpers" },
   { command: "addtohelp", description: "Join helpers list" },
   { command: "showhelpers", description: "Show all helpers in the group" },
   { command: "leavehelpers", description: "Leave the helpers" },
   {
-    command: "reset",
-    description: "Reset the bot and clear all queued requests",
+    command: "setreminder",
+    description: "Set a reminder at a specified date YYYY-MM-DD",
   },
-  { command: "setreminder", description: "Set a reminder at a specified date" },
   { command: "reminders", description: "View all reminders" },
   {
     command: "clearreminders",
