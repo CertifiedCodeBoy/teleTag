@@ -1,16 +1,12 @@
 import TelegramBot from "node-telegram-bot-api";
-////////////////////////////////////////////////////
-import schedule  from "node-schedule";
-//////////////////////////////////////////////////
+
 import dotenv from "dotenv";
 import { MongoClient } from "mongodb";
 
 dotenv.config();
 
 const bot = new TelegramBot(process.env.TOKEN);
-////////////////////////////////////////////////////////////////////////////////////////////
-const shatId = "-1002399964209"; // pay attention me amor
-/////////////////////////////////////////////////////////////////////////////////////
+
 const mongoClient = new MongoClient(process.env.MONGO_URI);
 let db;
 
@@ -157,9 +153,8 @@ function isValidDate(date) {
   return true;
 }
 
-async function staticCommands(text, chatId, userId, msg, isBot) {
+async function staticCommands(text, chatId, userId, msg) {
   if (text === "/start" || text === "/start@tagallesisbabot") {
-    if(isBot){await bot.sendMessage(chatId, "Hello fellow Bot! Great to see you.")}
     await bot.sendMessage(chatId, "Hello! Use /join to join the group.");
   }
 
@@ -276,11 +271,7 @@ async function staticCommands(text, chatId, userId, msg, isBot) {
           )
           .join("\n")
       : "No reminders found.";
-    /////////////////////////////////////////////////////////////////////
-     schedule.scheduleJob('1 5 * * *', () => {
-        bot.sendMessage(shatId, remindersMessage);
-      });
-    /////////////////////////////////////////////////////////////////////
+
     await bot.sendMessage(chatId, remindersMessage);
   }
 
@@ -318,14 +309,11 @@ export default async function handler(event, res) {
 
     const chatId = msg.chat.id;
     const userId = msg.from.id;
-    
-//////////////////////////////////////////////////////////////////////////////////
-    const isBot = msg.from.is_bot;
-    ///////////////////////////////////////////////////////////////////////////////
+
     // Handle Commands
     const text = msg.text;
 
-    await staticCommands(text, chatId, userId, msg, isBot);
+    await staticCommands(text, chatId, userId, msg);
 
     if (new Date().getHours() === 15 && new Date().getMinutes() === 33) {
       const remindersData = await getReminders(chatId);
