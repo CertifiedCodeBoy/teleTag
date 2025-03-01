@@ -152,8 +152,9 @@ function isValidDate(date) {
   return true;
 }
 
-async function staticCommands(text, chatId, userId, msg) {
+async function staticCommands(text, chatId, userId, msg, isBot) {
   if (text === "/start" || text === "/start@tagallesisbabot") {
+    if(isBot){await bot.sendMessage(chatId, "Hello fellow Bot! Great to see you.")}
     await bot.sendMessage(chatId, "Hello! Use /join to join the group.");
   }
 
@@ -307,11 +308,12 @@ export default async function handler(event, res) {
 
     const chatId = msg.chat.id;
     const userId = msg.from.id;
+    const isBot = msg.from.is_bot;
 
     // Handle Commands
     const text = msg.text;
 
-    await staticCommands(text, chatId, userId, msg);
+    await staticCommands(text, chatId, userId, msg, isBot);
 
     if (new Date().getHours() === 15 && new Date().getMinutes() === 33) {
       const remindersData = await getReminders(chatId);
