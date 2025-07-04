@@ -6,18 +6,186 @@ dotenv.config();
 
 const bot = new TelegramBot(process.env.TOKEN);
 
-const mongoClient = new MongoClient(process.env.MONGO_URI);
-let db;
+// Configuration
+const CONFIG = {
+  MAX_RETRIES: 3,
+  RETRY_DELAY: 1000,
+  CACHE_TTL: 5 * 60 * 1000, // 5 minutes
+  MAX_CONVERSATION_HISTORY: 20,
+  MAX_MESSAGE_LENGTH: 4000,
+  RATE_LIMIT: {
+    window: 60 * 1000, // 1 minute
+    max: 10, // 10 requests per minute per user
+  },
+};
 
-// AI Helper Functions - Updated to match your working GeminiService
-async function callGeminiAPI(prompt) {
+// Rate limiting
+const userRateLimit = new Map();
+
+// Simple cache implementation
+const cache = new Map();
+
+class DatabaseManager {
+  constructor() {
+    this.client = new MongoClient(process.env.MONGO_URI, {
+      maxPoolSize: 10,
+      serverSelectionTimeoutMS: 5000,
+      socketTimeoutMS: 45000,
+    });
+    this.db = null;
+    this.isConnected = false;
+  }
+
+  async connect() {
+    if (!this.isConnected) {
+      try {
+        await this.client.connect();
+        this.db = this.client.db("teleTag");
+        this.isConnected = true;
+        console.log("Connected to MongoDB");
+
+        // Create indexes for better performance
+        await this.createIndexes();
+      } catch (err) {
+        console.error("Error connecting to MongoDB", err);
+        throw err;
+      }
+    }
+    return this.db;
+  }
+
+  async createIndexes() {
+    try {
+      await this.db.collection("groupMembers").createIndex({ chatId: 1 });
+      await this.db.collection("helpers").createIndex({ chatId: 1 });
+      await this.db.collection("reminders").createIndex({ chatId: 1 });
+      await this.db.collection("aiConversations").createIndex({ chatId: 1, userId: 1 });
+      await this.db.collection("apiUsage").createIndex({ date: 1 }, { expireAfterSeconds: 86400 });
+    } catch (error) {
+      console.error("Error creating indexes:", error);
+    }
+  }
+
+  async disconnect() {
+    if (this.isConnected) {
+      await this.client.close();
+      this.isConnected = false;
+    }
+  }
+
+  getCollection(name) {
+    if (!this.isConnected) {
+      throw new Error("Database not connected");
+    }
+    return this.db.collection(name);
+  }
+}
+
+const dbManager = new DatabaseManager();
+
+// Enhanced error handling
+class BotError extends Error {
+  constructor(message, code, statusCode = 500) {
+    super(message);
+    this.name = "BotError";
+    this.code = code;
+    this.statusCode = statusCode;
+  }
+}
+
+// Rate limiting function
+function checkRateLimit(userId) {
+  const now = Date.now();
+  const userKey = `user_${userId}`;
+
+  if (!userRateLimit.has(userKey)) {
+    userRateLimit.set(userKey, { requests: 1, resetTime: now + CONFIG.RATE_LIMIT.window });
+    return true;
+  }
+
+  const userData = userRateLimit.get(userKey);
+
+  if (now > userData.resetTime) {
+    userData.requests = 1;
+    userData.resetTime = now + CONFIG.RATE_LIMIT.window;
+    return true;
+  }
+
+  if (userData.requests >= CONFIG.RATE_LIMIT.max) {
+    return false;
+  }
+
+  userData.requests++;
+  return true;
+}
+
+// Enhanced cache functions
+function getCacheKey(type, ...args) {
+  return `${type}_${args.join("_")}`;
+}
+
+function getFromCache(key) {
+  const cached = cache.get(key);
+  if (cached && Date.now() < cached.expiry) {
+    return cached.data;
+  }
+  cache.delete(key);
+  return null;
+}
+
+function setCache(key, data, ttl = CONFIG.CACHE_TTL) {
+  cache.set(key, {
+    data,
+    expiry: Date.now() + ttl,
+  });
+}
+
+// Enhanced API usage tracking
+async function trackAPIUsage() {
   try {
-    // Track usage
-    trackAPIUsage();
-    
-    // Check if API key exists
+    const today = new Date().toISOString().split("T")[0];
+    const collection = dbManager.getCollection("apiUsage");
+
+    await collection.updateOne(
+      { date: today },
+      {
+        $inc: { count: 1 },
+        $setOnInsert: { date: today, created: new Date() },
+      },
+      { upsert: true }
+    );
+  } catch (error) {
+    console.error("Error tracking API usage:", error);
+  }
+}
+
+async function getAPIUsage() {
+  try {
+    const today = new Date().toISOString().split("T")[0];
+    const collection = dbManager.getCollection("apiUsage");
+    const usage = await collection.findOne({ date: today });
+    return usage?.count || 0;
+  } catch (error) {
+    console.error("Error getting API usage:", error);
+    return 0;
+  }
+}
+
+// Enhanced Gemini API call with retry logic
+async function callGeminiAPI(prompt, retries = CONFIG.MAX_RETRIES) {
+  if (!prompt || typeof prompt !== "string") {
+    throw new BotError("Invalid prompt provided", "INVALID_PROMPT", 400);
+  }
+
+  if (prompt.length > CONFIG.MAX_MESSAGE_LENGTH) {
+    throw new BotError("Prompt too long", "PROMPT_TOO_LONG", 400);
+  }
+
+  try {
+    await trackAPIUsage();
+
     if (!process.env.GEMINI_API_KEY) {
-      throw new Error('GEMINI_API_KEY not found in environment variables');
+      throw new BotError("GEMINI_API_KEY not found in environment variables", "MISSING_API_KEY", 500);
     }
 
     const model = "gemini-1.5-flash";
@@ -33,11 +201,7 @@ async function callGeminiAPI(prompt) {
         body: JSON.stringify({
           contents: [
             {
-              parts: [
-                {
-                  text: prompt,
-                },
-              ],
+              parts: [{ text: prompt }],
             },
           ],
           generationConfig: {
@@ -71,74 +235,295 @@ async function callGeminiAPI(prompt) {
     if (!response.ok) {
       const errorData = await response.json();
       console.error("Gemini API Error:", errorData);
-      
-      // Check if it's a quota exceeded error
+
       if (response.status === 429 || errorData.error?.message?.includes("quota")) {
-        throw new Error("QUOTA_EXCEEDED");
+        throw new BotError("QUOTA_EXCEEDED", "QUOTA_EXCEEDED", 429);
       }
-      
-      throw new Error(
-        `Gemini API error: ${response.status} - ${
-          errorData.error?.message || "Unknown error"
-        }`
+
+      // Retry on server errors
+      if (response.status >= 500 && retries > 0) {
+        console.log(`Retrying API call... ${retries} attempts left`);
+        await new Promise((resolve) => setTimeout(resolve, CONFIG.RETRY_DELAY));
+        return callGeminiAPI(prompt, retries - 1);
+      }
+
+      throw new BotError(
+        `Gemini API error: ${response.status} - ${errorData.error?.message || "Unknown error"}`,
+        "API_ERROR",
+        response.status
       );
     }
 
     const data = await response.json();
-    
+
     if (!data.candidates || data.candidates.length === 0) {
-      throw new Error("No response generated from Gemini API");
+      throw new BotError("No response generated from Gemini API", "NO_RESPONSE", 500);
     }
 
-    const responseText = data.candidates[0].content.parts[0].text;
-    return responseText;
-
+    return data.candidates[0].content.parts[0].text;
   } catch (error) {
     console.error("Gemini API Error:", error);
-    
-    if (error.message === "QUOTA_EXCEEDED") {
-      return "⚠️ API quota exceeded! You've reached your free tier limit. Please try again tomorrow or upgrade your plan.";
-    } else if (error.message.includes("API key")) {
-      return "Invalid Gemini API key. Please check your configuration.";
-    } else if (error.message.includes("network")) {
-      return "Network error connecting to Gemini API. Please check your internet connection.";
+
+    if (error instanceof BotError) {
+      throw error;
     }
-    
-    return "Sorry, I'm having trouble processing your request right now. Please try again later.";
+
+    // Retry on network errors
+    if (error.name === "TypeError" && retries > 0) {
+      console.log(`Retrying due to network error... ${retries} attempts left`);
+      await new Promise((resolve) => setTimeout(resolve, CONFIG.RETRY_DELAY));
+      return callGeminiAPI(prompt, retries - 1);
+    }
+
+    throw new BotError("Network error connecting to Gemini API", "NETWORK_ERROR", 500);
   }
 }
 
-async function connectToDatabase() {
-  if (!db) {
-    try {
-      await mongoClient.connect();
-      db = mongoClient.db("teleTag");
-      console.log("Connected to MongoDB");
-    } catch (err) {
-      console.error("Error connecting to MongoDB", err);
-      throw err;
-    }
-  }
-  return db;
+// Enhanced database functions with caching
+async function getGroupMembers(chatId) {
+  const cacheKey = getCacheKey("members", chatId);
+  const cached = getFromCache(cacheKey);
+  if (cached) return cached;
+
+  const collection = dbManager.getCollection("groupMembers");
+  const groupData = await collection.findOne({ chatId });
+  const result = groupData || { chatId, members: [] };
+
+  setCache(cacheKey, result);
+  return result;
 }
 
-// Ensure database is connected before using collections
-const membersCollection = async () => {
-  await connectToDatabase();
-  return db.collection("groupMembers");
-};
-const helpersCollection = async () => {
-  await connectToDatabase();
-  return db.collection("helpers");
-};
-const remindersCollection = async () => {
-  await connectToDatabase();
-  return db.collection("reminders");
-};
-const aiConversationsCollection = async () => {
-  await connectToDatabase();
-  return db.collection("aiConversations");
-};
+async function updateGroupMembers(chatId, members) {
+  const collection = dbManager.getCollection("groupMembers");
+  const result = await collection.updateOne(
+    { chatId },
+    { $set: { members, lastUpdated: new Date() } },
+    { upsert: true }
+  );
+
+  // Invalidate cache
+  const cacheKey = getCacheKey("members", chatId);
+  cache.delete(cacheKey);
+
+  return result;
+}
+
+async function getHelpers(chatId) {
+  const cacheKey = getCacheKey("helpers", chatId);
+  const cached = getFromCache(cacheKey);
+  if (cached) return cached;
+
+  const collection = dbManager.getCollection("helpers");
+  const helpersData = await collection.findOne({ chatId });
+  const result = helpersData || { chatId, helpers: [] };
+
+  setCache(cacheKey, result);
+  return result;
+}
+
+async function updateHelpers(chatId, helpers) {
+  const collection = dbManager.getCollection("helpers");
+  const result = await collection.updateOne(
+    { chatId },
+    { $set: { helpers, lastUpdated: new Date() } },
+    { upsert: true }
+  );
+
+  // Invalidate cache
+  const cacheKey = getCacheKey("helpers", chatId);
+  cache.delete(cacheKey);
+
+  return result;
+}
+
+async function getReminders(chatId) {
+  const cacheKey = getCacheKey("reminders", chatId);
+  const cached = getFromCache(cacheKey);
+  if (cached) return cached;
+
+  const collection = dbManager.getCollection("reminders");
+  const remindersData = await collection.findOne({ chatId });
+  const result = remindersData || { chatId, reminders: [] };
+
+  setCache(cacheKey, result);
+  return result;
+}
+
+async function updateReminders(chatId, reminders) {
+  const collection = dbManager.getCollection("reminders");
+  const result = await collection.updateOne(
+    { chatId },
+    { $set: { reminders, lastUpdated: new Date() } },
+    { upsert: true }
+  );
+
+  // Invalidate cache
+  const cacheKey = getCacheKey("reminders", chatId);
+  cache.delete(cacheKey);
+
+  return result;
+}
+
+// Enhanced AI conversation functions
+async function getAIConversation(chatId, userId) {
+  const collection = dbManager.getCollection("aiConversations");
+  const conversation = await collection.findOne({ chatId, userId });
+  return conversation?.messages || [];
+}
+
+async function saveAIConversation(chatId, userId, messages) {
+  const collection = dbManager.getCollection("aiConversations");
+  await collection.updateOne(
+    { chatId, userId },
+    {
+      $set: {
+        messages: messages.slice(-CONFIG.MAX_CONVERSATION_HISTORY),
+        lastUpdated: new Date(),
+      },
+    },
+    { upsert: true }
+  );
+}
+
+async function generateAIResponse(prompt, chatId, userId) {
+  try {
+    if (!checkRateLimit(userId)) {
+      return "⚠️ Rate limit exceeded. Please wait a moment before sending another request.";
+    }
+
+    const history = await getAIConversation(chatId, userId);
+    let fullPrompt = "You are a helpful AI assistant in a Telegram group chat. Keep responses concise and helpful. ";
+
+    if (history.length > 0) {
+      fullPrompt += "Previous conversation:\n";
+      history.slice(-10).forEach((msg) => {
+        fullPrompt += `${msg.role}: ${msg.content}\n`;
+      });
+      fullPrompt += "\n";
+    }
+
+    fullPrompt += `User: ${prompt}`;
+
+    const aiResponse = await callGeminiAPI(fullPrompt);
+
+    if (aiResponse && !aiResponse.includes("Sorry, I'm having trouble")) {
+      const newMessages = [
+        ...history,
+        { role: "user", content: prompt, timestamp: new Date() },
+        { role: "assistant", content: aiResponse, timestamp: new Date() },
+      ];
+
+      await saveAIConversation(chatId, userId, newMessages);
+    }
+
+    return aiResponse;
+  } catch (error) {
+    console.error("AI Error:", error);
+
+    if (error instanceof BotError) {
+      switch (error.code) {
+        case "QUOTA_EXCEEDED":
+          return "⚠️ API quota exceeded! You've reached your free tier limit. Please try again tomorrow or upgrade your plan.";
+        case "RATE_LIMIT":
+          return "⚠️ Too many requests. Please wait a moment before trying again.";
+        case "INVALID_PROMPT":
+          return "❌ Invalid input provided. Please check your message and try again.";
+        default:
+          return "Sorry, I'm having trouble processing your request right now.";
+      }
+    }
+
+    return "Sorry, I'm having trouble processing your request right now.";
+  }
+}
+
+// Enhanced utility functions
+function sanitizeInput(text) {
+  if (typeof text !== "string") return "";
+  return text.trim().substring(0, CONFIG.MAX_MESSAGE_LENGTH);
+}
+
+function isValidDate(date) {
+  if (typeof date !== "string") return false;
+
+  const dateParts = date.split("-");
+  if (dateParts.length !== 3) return false;
+
+  const year = parseInt(dateParts[0]);
+  const month = parseInt(dateParts[1]);
+  const day = parseInt(dateParts[2]);
+
+  if (isNaN(year) || isNaN(month) || isNaN(day)) return false;
+  if (year < 2024 || year > 2030) return false;
+  if (month < 1 || month > 12) return false;
+  if (day < 1 || day > 31) return false;
+
+  const currentDate = new Date();
+  const inputDate = new Date(year, month - 1, day);
+
+  if (inputDate <= currentDate) return false;
+  if (inputDate.getMonth() !== month - 1) return false;
+
+  return true;
+}
+
+async function translateText(text) {
+  const sanitized = sanitizeInput(text);
+  const prompt = `Translate the following text to English. If it's already in English, translate to Arabic. Only provide the translation:\n\n${sanitized}`;
+  return await callGeminiAPI(prompt);
+}
+
+async function summarizeText(text) {
+  const sanitized = sanitizeInput(text);
+  const prompt = `Summarize the following text in a concise way:\n\n${sanitized}`;
+  return await callGeminiAPI(prompt);
+}
+
+async function readStream(stream) {
+  const reader = stream.getReader();
+  const chunks = [];
+  let done = false;
+
+  while (!done) {
+    const { value, done: readerDone } = await reader.read();
+    if (value) chunks.push(value);
+    done = readerDone;
+  }
+
+  return new TextDecoder().decode(Buffer.concat(chunks));
+}
+
+// Enhanced API status check
+async function checkGeminiAPIStatus() {
+  try {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GEMINI_API_KEY}`,
+      {
+        method: "GET",
+        headers: { "Content-Type": "application/json" },
+        signal: AbortSignal.timeout(10000), // 10 second timeout
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`API Status Check Failed: ${response.status}`);
+    }
+
+    const data = await response.json();
+    return {
+      status: "active",
+      models: data.models?.length || 0,
+      message: "API key is working correctly",
+    };
+  } catch (error) {
+    console.error("API Status Check Error:", error);
+    return {
+      status: "error",
+      models: 0,
+      message: error.message,
+    };
+  }
+}
 
 const commands = [
   { command: "mentionall", description: "Mention all members in the group" },
@@ -173,8 +558,8 @@ const commands = [
 // Initialize bot commands after ensuring database connection
 async function initializeBot() {
   try {
-    await connectToDatabase();
-    
+    await dbManager.connect();
+
     const alreadysetcommands = await bot.getMyCommands();
 
     if (alreadysetcommands.length !== commands.length) {
@@ -185,422 +570,243 @@ async function initializeBot() {
     }
   } catch (error) {
     console.error("Error initializing bot:", error);
+    throw error;
   }
 }
 
 // Initialize bot
-initializeBot();
+initializeBot().catch(console.error);
 
-// AI Helper Functions
-async function getAIConversation(chatId, userId) {
-  const collection = await aiConversationsCollection();
-  const conversation = await collection.findOne({
-    chatId,
-    userId,
-  });
-  return conversation?.messages || [];
-}
-
-async function saveAIConversation(chatId, userId, messages) {
-  const collection = await aiConversationsCollection();
-  await collection.updateOne(
-    { chatId, userId },
-    { $set: { messages, lastUpdated: new Date() } },
-    { upsert: true }
-  );
-}
-
-async function generateAIResponse(prompt, chatId, userId) {
-  try {
-    // Get conversation history
-    const history = await getAIConversation(chatId, userId);
-
-    // Build context with history
-    let fullPrompt = "You are a helpful AI assistant in a Telegram group chat. ";
-
-    if (history.length > 0) {
-      fullPrompt += "Previous conversation:\n";
-      history.slice(-10).forEach((msg) => {
-        fullPrompt += `${msg.role}: ${msg.content}\n`;
-      });
-      fullPrompt += "\n";
-    }
-
-    fullPrompt += `User: ${prompt}`;
-
-    const aiResponse = await callGeminiAPI(fullPrompt);
-
-    // Only save conversation if we got a valid response
-    if (aiResponse && !aiResponse.includes("Sorry, I'm having trouble")) {
-      // Update conversation history
-      const newMessages = [
-        ...history,
-        { role: "user", content: prompt, timestamp: new Date() },
-        { role: "assistant", content: aiResponse, timestamp: new Date() },
-      ].slice(-20); // Keep last 20 messages
-
-      await saveAIConversation(chatId, userId, newMessages);
-    }
-
-    return aiResponse;
-  } catch (error) {
-    console.error("AI Error:", error);
-    return "Sorry, I'm having trouble processing your request right now.";
-  }
-}
-
-async function translateText(text) {
-  const prompt = `Translate the following text to English. If it's already in English, translate to Arabic. Only provide the translation:\n\n${text}`;
-  return await callGeminiAPI(prompt);
-}
-
-async function summarizeText(text) {
-  const prompt = `Summarize the following text in a concise way:\n\n${text}`;
-  return await callGeminiAPI(prompt);
-}
-
-// Helper Functions
-async function getGroupMembers(chatId) {
-  const collection = await membersCollection();
-  const groupData = await collection.findOne({ chatId });
-  return groupData || { chatId, members: [] };
-}
-
-async function updateGroupMembers(chatId, members) {
-  const collection = await membersCollection();
-  return collection.updateOne(
-    { chatId },
-    { $set: { members } },
-    { upsert: true }
-  );
-}
-
-async function getHelpers(chatId) {
-  const collection = await helpersCollection();
-  const helpersData = await collection.findOne({ chatId });
-  return helpersData || { chatId, helpers: [] };
-}
-
-async function updateHelpers(chatId, helpers) {
-  const collection = await helpersCollection();
-  return collection.updateOne(
-    { chatId },
-    { $set: { helpers } },
-    { upsert: true }
-  );
-}
-
-async function getReminders(chatId) {
-  const collection = await remindersCollection();
-  const remindersData = await collection.findOne({ chatId });
-  return remindersData || { chatId, reminders: [] };
-}
-
-async function updateReminders(chatId, reminders) {
-  const collection = await remindersCollection();
-  return collection.updateOne(
-    { chatId },
-    { $set: { reminders } },
-    { upsert: true }
-  );
-}
-
-async function readStream(stream) {
-  const reader = stream.getReader();
-  const chunks = [];
-  let done = false;
-
-  while (!done) {
-    const { value, done: readerDone } = await reader.read();
-    if (value) chunks.push(value);
-    done = readerDone;
-  }
-
-  return new TextDecoder().decode(Buffer.concat(chunks));
-}
-
-function isValidDate(date) {
-  const dateParts = date.split("-");
-  if (dateParts.length !== 3) return false;
-  const year = parseInt(dateParts[0]);
-  const month = parseInt(dateParts[1]);
-  const day = parseInt(dateParts[2]);
-
-  if (isNaN(year) || isNaN(month) || isNaN(day)) return false;
-
-  const currentDate = new Date();
-  const inputDate = new Date(year, month - 1, day);
-
-  if (inputDate <= currentDate) return false;
-
-  if (inputDate.getMonth() !== month - 1) return false;
-
-  return true;
-}
-
-let dailyUsageCounter = 0;
-let lastResetDate = new Date().toDateString();
-
-function trackAPIUsage() {
-  const today = new Date().toDateString();
-  if (today !== lastResetDate) {
-    dailyUsageCounter = 0;
-    lastResetDate = today;
-  }
-  dailyUsageCounter++;
-}
-
-// Add this function to check API status
-async function checkGeminiAPIStatus() {
-  try {
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GEMINI_API_KEY}`,
-      {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-        },
-      }
-    );
-
-    if (!response.ok) {
-      throw new Error(`API Status Check Failed: ${response.status}`);
-    }
-
-    const data = await response.json();
-    return {
-      status: "active",
-      models: data.models?.length || 0,
-      message: "API key is working correctly"
-    };
-  } catch (error) {
-    console.error("API Status Check Error:", error);
-    return {
-      status: "error",
-      models: 0,
-      message: error.message
-    };
-  }
-}
-
+// Enhanced staticCommands function with better error handling
 async function staticCommands(text, chatId, userId, msg) {
-  if (text === "/start" || text === "/start@tagallesisbabot") {
-    await bot.sendMessage(
-      chatId,
-      "Hello! I'm your AI-powered group assistant. Use /join to join the group or /ask to chat with me!"
-    );
-  }
+  try {
+    const sanitizedText = sanitizeInput(text);
 
-  if (text === "/join" || text === "/join@tagallesisbabot") {
-    const groupData = await getGroupMembers(chatId);
-    const user = { id: userId, first_name: msg.from.first_name };
-
-    if (!groupData.members.some((member) => member.id === userId)) {
-      groupData.members.push(user);
-      await updateGroupMembers(chatId, groupData.members);
-      await bot.sendMessage(chatId, "You have joined the group!");
-    } else {
-      await bot.sendMessage(chatId, "You are already a member!");
-    }
-  }
-
-  if (text === "/leave" || text === "/leave@tagallesisbabot") {
-    const groupData = await getGroupMembers(chatId);
-    const userIndex = groupData.members.findIndex(
-      (member) => member.id === userId
-    );
-
-    if (userIndex !== -1) {
-      groupData.members.splice(userIndex, 1);
-      await updateGroupMembers(chatId, groupData.members);
-      await bot.sendMessage(chatId, "You have left the group!");
-    } else {
-      await bot.sendMessage(chatId, "You are not a member!");
-    }
-  }
-
-  if (text === "/showmembers" || text === "/showmembers@tagallesisbabot") {
-    const groupData = await getGroupMembers(chatId);
-    const membersMessage = groupData.members.length
-      ? groupData.members.map((member) => member.first_name).join(", ")
-      : "No members found.";
-    await bot.sendMessage(chatId, membersMessage);
-  }
-
-  if (text === "/mentionall" || text === "/mentionall@tagallesisbabot") {
-    const groupData = await getGroupMembers(chatId);
-    const mentions = groupData.members.map(
-      (member) => `[${member.first_name}](tg://user?id=${member.id})`
-    );
-
-    const message = mentions.length
-      ? mentions.join(" ")
-      : "No members to mention.";
-    await bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
-  }
-
-  if (text === "/addtohelp" || text === "/addtohelp@tagallesisbabot") {
-    const helpersData = await getHelpers(chatId);
-    const helper = { id: userId, first_name: msg.from.first_name };
-
-    if (!helpersData.helpers.some((h) => h.id === userId)) {
-      helpersData.helpers.push(helper);
-      await updateHelpers(chatId, helpersData.helpers);
-      await bot.sendMessage(chatId, "You have joined the helpers!");
-    } else {
-      await bot.sendMessage(chatId, "You are already a helper!");
-    }
-  }
-
-  if (text === "/showhelpers" || text === "/showhelpers@tagallesisbabot") {
-    const helpersData = await getHelpers(chatId);
-    const helpersMessage = helpersData.helpers.length
-      ? helpersData.helpers.map((helper) => helper.first_name).join(", ")
-      : "No helpers found.";
-    await bot.sendMessage(chatId, helpersMessage);
-  }
-
-  if (text === "/leavehelpers" || text === "/leavehelpers@tagallesisbabot") {
-    const helpersData = await getHelpers(chatId);
-    const userIndex = helpersData.helpers.findIndex(
-      (helper) => helper.id === userId
-    );
-
-    if (userIndex !== -1) {
-      helpersData.helpers.splice(userIndex, 1);
-      await updateHelpers(chatId, helpersData.helpers);
-      await bot.sendMessage(chatId, "You have left the helpers!");
-    } else {
-      await bot.sendMessage(chatId, "You are not a helper!");
-    }
-  }
-
-  if (text === "/help" || text === "/help@tagallesisbabot") {
-    const helpersData = await getHelpers(chatId);
-    const mentions = helpersData.helpers.map(
-      (helper) => `[${helper.first_name}](tg://user?id=${helper.id})`
-    );
-    const message = mentions.length
-      ? mentions.join(" ")
-      : "No helpers available right now.";
-    await bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
-  }
-
-  if (text === "/reminders" || text === "/reminders@tagallesisbabot") {
-    const remindersData = await getReminders(chatId);
-    const remindersMessage = remindersData.reminders.length
-      ? remindersData.reminders
-          .map(
-            (reminder, index) =>
-              `${index + 1}. ${reminder.text} - ${new Date(
-                reminder.date
-              ).toLocaleDateString("fr-dz", {
-                weekday: "long",
-                day: "numeric",
-                month: "long",
-                year: "numeric",
-              })}`
-          )
-          .join("\n")
-      : "No reminders found.";
-    await bot.sendMessage(chatId, remindersMessage);
-  }
-
-  if (
-    text === "/clearreminders" ||
-    text === "/clearreminders@tagallesisbabot"
-  ) {
-    await updateReminders(chatId, []);
-    await bot.sendMessage(chatId, "Reminders cleared");
-  }
-
-  // AI Commands
-  if (text === "/clearai" || text === "/clearai@tagallesisbabot") {
-    const collection = await aiConversationsCollection();
-    await collection.deleteOne({ chatId, userId });
-    await bot.sendMessage(chatId, "🤖 AI conversation history cleared!");
-  }
-
-  if (text === "/translate" || text === "/translate@tagallesisbabot") {
-    if (msg.reply_to_message && msg.reply_to_message.text) {
-      await bot.sendChatAction(chatId, "typing");
-      const translation = await translateText(msg.reply_to_message.text);
-      await bot.sendMessage(chatId, `🌐 Translation:\n${translation}`);
-    } else {
+    if (sanitizedText === "/start" || sanitizedText === "/start@tagallesisbabot") {
       await bot.sendMessage(
         chatId,
-        "Please reply to a message to translate it."
+        "Hello! I'm your AI-powered group assistant. Use /join to join the group or /ask to chat with me!"
       );
     }
-  }
 
-  if (text === "/summarize" || text === "/summarize@tagallesisbabot") {
-    if (msg.reply_to_message && msg.reply_to_message.text) {
-      await bot.sendChatAction(chatId, "typing");
-      const summary = await summarizeText(msg.reply_to_message.text);
-      await bot.sendMessage(chatId, `📝 Summary:\n${summary}`);
-    } else {
+    if (sanitizedText === "/join" || sanitizedText === "/join@tagallesisbabot") {
+      const groupData = await getGroupMembers(chatId);
+      const user = { id: userId, first_name: msg.from.first_name };
+
+      if (!groupData.members.some((member) => member.id === userId)) {
+        groupData.members.push(user);
+        await updateGroupMembers(chatId, groupData.members);
+        await bot.sendMessage(chatId, "You have joined the group!");
+      } else {
+        await bot.sendMessage(chatId, "You are already a member!");
+      }
+    }
+
+    if (sanitizedText === "/leave" || sanitizedText === "/leave@tagallesisbabot") {
+      const groupData = await getGroupMembers(chatId);
+      const userIndex = groupData.members.findIndex(
+        (member) => member.id === userId
+      );
+
+      if (userIndex !== -1) {
+        groupData.members.splice(userIndex, 1);
+        await updateGroupMembers(chatId, groupData.members);
+        await bot.sendMessage(chatId, "You have left the group!");
+      } else {
+        await bot.sendMessage(chatId, "You are not a member!");
+      }
+    }
+
+    if (sanitizedText === "/showmembers" || sanitizedText === "/showmembers@tagallesisbabot") {
+      const groupData = await getGroupMembers(chatId);
+      const membersMessage = groupData.members.length
+        ? groupData.members.map((member) => member.first_name).join(", ")
+        : "No members found.";
+      await bot.sendMessage(chatId, membersMessage);
+    }
+
+    if (sanitizedText === "/mentionall" || sanitizedText === "/mentionall@tagallesisbabot") {
+      const groupData = await getGroupMembers(chatId);
+      const mentions = groupData.members.map(
+        (member) => `[${member.first_name}](tg://user?id=${member.id})`
+      );
+
+      const message = mentions.length
+        ? mentions.join(" ")
+        : "No members to mention.";
+      await bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
+    }
+
+    if (sanitizedText === "/addtohelp" || sanitizedText === "/addtohelp@tagallesisbabot") {
+      const helpersData = await getHelpers(chatId);
+      const helper = { id: userId, first_name: msg.from.first_name };
+
+      if (!helpersData.helpers.some((h) => h.id === userId)) {
+        helpersData.helpers.push(helper);
+        await updateHelpers(chatId, helpersData.helpers);
+        await bot.sendMessage(chatId, "You have joined the helpers!");
+      } else {
+        await bot.sendMessage(chatId, "You are already a helper!");
+      }
+    }
+
+    if (sanitizedText === "/showhelpers" || sanitizedText === "/showhelpers@tagallesisbabot") {
+      const helpersData = await getHelpers(chatId);
+      const helpersMessage = helpersData.helpers.length
+        ? helpersData.helpers.map((helper) => helper.first_name).join(", ")
+        : "No helpers found.";
+      await bot.sendMessage(chatId, helpersMessage);
+    }
+
+    if (sanitizedText === "/leavehelpers" || sanitizedText === "/leavehelpers@tagallesisbabot") {
+      const helpersData = await getHelpers(chatId);
+      const userIndex = helpersData.helpers.findIndex(
+        (helper) => helper.id === userId
+      );
+
+      if (userIndex !== -1) {
+        helpersData.helpers.splice(userIndex, 1);
+        await updateHelpers(chatId, helpersData.helpers);
+        await bot.sendMessage(chatId, "You have left the helpers!");
+      } else {
+        await bot.sendMessage(chatId, "You are not a helper!");
+      }
+    }
+
+    if (sanitizedText === "/help" || sanitizedText === "/help@tagallesisbabot") {
+      const helpersData = await getHelpers(chatId);
+      const mentions = helpersData.helpers.map(
+        (helper) => `[${helper.first_name}](tg://user?id=${helper.id})`
+      );
+      const message = mentions.length
+        ? mentions.join(" ")
+        : "No helpers available right now.";
+      await bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
+    }
+
+    if (sanitizedText === "/reminders" || sanitizedText === "/reminders@tagallesisbabot") {
+      const remindersData = await getReminders(chatId);
+      const remindersMessage = remindersData.reminders.length
+        ? remindersData.reminders
+            .map(
+              (reminder, index) =>
+                `${index + 1}. ${reminder.text} - ${new Date(
+                  reminder.date
+                ).toLocaleDateString("fr-dz", {
+                  weekday: "long",
+                  day: "numeric",
+                  month: "long",
+                  year: "numeric",
+                })}`
+            )
+            .join("\n")
+        : "No reminders found.";
+      await bot.sendMessage(chatId, remindersMessage);
+    }
+
+    if (
+      sanitizedText === "/clearreminders" ||
+      sanitizedText === "/clearreminders@tagallesisbabot"
+    ) {
+      await updateReminders(chatId, []);
+      await bot.sendMessage(chatId, "Reminders cleared");
+    }
+
+    // AI Commands
+    if (sanitizedText === "/clearai" || sanitizedText === "/clearai@tagallesisbabot") {
+      const collection = await aiConversationsCollection();
+      await collection.deleteOne({ chatId, userId });
+      await bot.sendMessage(chatId, "🤖 AI conversation history cleared!");
+    }
+
+    if (sanitizedText === "/translate" || sanitizedText === "/translate@tagallesisbabot") {
+      if (msg.reply_to_message && msg.reply_to_message.text) {
+        await bot.sendChatAction(chatId, "typing");
+        const translation = await translateText(msg.reply_to_message.text);
+        await bot.sendMessage(chatId, `🌐 Translation:\n${translation}`);
+      } else {
+        await bot.sendMessage(
+          chatId,
+          "Please reply to a message to translate it."
+        );
+      }
+    }
+
+    if (sanitizedText === "/summarize" || sanitizedText === "/summarize@tagallesisbabot") {
+      if (msg.reply_to_message && msg.reply_to_message.text) {
+        await bot.sendChatAction(chatId, "typing");
+        const summary = await summarizeText(msg.reply_to_message.text);
+        await bot.sendMessage(chatId, `📝 Summary:\n${summary}`);
+      } else {
+        await bot.sendMessage(
+          chatId,
+          "Please reply to a message to summarize it."
+        );
+      }
+    }
+
+    if (sanitizedText === "/reset" || sanitizedText === "/reset@tagallesisbabot") {
+      await updateGroupMembers(chatId, []);
+      await updateHelpers(chatId, []);
+      await updateReminders(chatId, []);
+      const collection = await aiConversationsCollection();
+      await collection.deleteMany({ chatId });
       await bot.sendMessage(
         chatId,
-        "Please reply to a message to summarize it."
+        "Bot has been completely reset (including AI conversations)."
       );
     }
-  }
 
-  if (text === "/reset" || text === "/reset@tagallesisbabot") {
-    await updateGroupMembers(chatId, []);
-    await updateHelpers(chatId, []);
-    await updateReminders(chatId, []);
-    const collection = await aiConversationsCollection();
-    await collection.deleteMany({ chatId });
-    await bot.sendMessage(
-      chatId,
-      "Bot has been completely reset (including AI conversations)."
-    );
-  }
+    // Enhanced credits command
+    if (sanitizedText === "/credits" || sanitizedText === "/credits@tagallesisbabot") {
+      try {
+        await bot.sendChatAction(chatId, "typing");
 
-  // Add credits command
-  if (text === "/credits" || text === "/credits@tagallesisbabot") {
-    try {
-      await bot.sendChatAction(chatId, "typing");
-      
-      const apiStatus = await checkGeminiAPIStatus();
-      
-      const creditsMessage = `
+        const [apiStatus, todayUsage] = await Promise.all([
+          checkGeminiAPIStatus(),
+          getAPIUsage(),
+        ]);
+
+        const creditsMessage = `
 📊 **API Usage Information**
 
-🔑 **API Status**: ${apiStatus.status === 'active' ? '✅ Active' : '❌ Error'}
+🔑 **API Status**: ${apiStatus.status === "active" ? "✅ Active" : "❌ Error"}
 🤖 **Available Models**: ${apiStatus.models}
-📈 **Today's Requests**: ${dailyUsageCounter}
+📈 **Today's Requests**: ${todayUsage}
 
 📋 **Free Tier Limits** (Gemini):
 • 15 requests per minute
 • 1,500 requests per day
 • 1 million tokens per day
 
-💡 **Tips to Monitor Usage**:
-• Check Google AI Studio Console
-• Visit: https://aistudio.google.com/
-• Go to "API Keys" section for usage stats
+💡 **Performance Features**:
+• Rate limiting: ${CONFIG.RATE_LIMIT.max} requests per minute
+• Caching enabled for faster responses
+• Automatic retry on failures
 
-⚠️ **Important**: This bot tracks requests locally (resets daily). For accurate quota info, check Google AI Studio.
+⚠️ **Important**: Check Google AI Studio Console for accurate quota info.
+Visit: https://aistudio.google.com/
 
 ${apiStatus.message}
-      `;
-      
-      await bot.sendMessage(chatId, creditsMessage, { parse_mode: "Markdown" });
-    } catch (error) {
-      console.error("Credits command error:", error);
-      await bot.sendMessage(chatId, "❌ Unable to fetch API information right now.");
+        `;
+
+        await bot.sendMessage(chatId, creditsMessage, { parse_mode: "Markdown" });
+      } catch (error) {
+        console.error("Credits command error:", error);
+        await bot.sendMessage(chatId, "❌ Unable to fetch API information right now.");
+      }
     }
+  } catch (error) {
+    console.error("Error in staticCommands:", error);
+    await bot.sendMessage(chatId, "❌ An error occurred while processing your command.");
   }
 }
 
+// Enhanced main handler with better error handling
 export default async function handler(event) {
   try {
-    // Ensure database is connected at the start of each request
-    await connectToDatabase();
-    
+    await dbManager.connect();
+
     const bodyString = await readStream(event.body);
     const body = JSON.parse(bodyString);
 
@@ -614,15 +820,20 @@ export default async function handler(event) {
 
     const chatId = msg.chat.id;
     const userId = msg.from.id;
-    const text = msg.text;
+    const text = sanitizeInput(msg.text);
 
     // Handle static commands first
     await staticCommands(text, chatId, userId, msg);
 
-    // AI Ask Command
+    // AI Ask Command with enhanced error handling
     if (text.startsWith("/ask ") || text.startsWith("/ask@tagallesisbabot ")) {
       const question = text.replace(/^\/ask(@tagallesisbabot)?\s+/, "");
       if (question.trim()) {
+        if (!checkRateLimit(userId)) {
+          await bot.sendMessage(chatId, "⚠️ Rate limit exceeded. Please wait a moment before asking another question.");
+          return new Response(JSON.stringify({ message: "Rate limited" }), { status: 200 });
+        }
+
         await bot.sendChatAction(chatId, "typing");
         const aiResponse = await generateAIResponse(question, chatId, userId);
         await bot.sendMessage(chatId, `🤖 ${aiResponse}`);
@@ -634,7 +845,7 @@ export default async function handler(event) {
       }
     }
 
-    // Smart AI responses for questions or mentions
+    // Enhanced smart AI responses
     if (
       !text.startsWith("/") &&
       (text.includes("?") ||
@@ -642,6 +853,10 @@ export default async function handler(event) {
         text.includes("@tagallesisbabot") ||
         msg.reply_to_message?.from?.username === "tagallesisbabot")
     ) {
+      if (!checkRateLimit(userId)) {
+        return new Response(JSON.stringify({ message: "Rate limited" }), { status: 200 });
+      }
+
       await bot.sendChatAction(chatId, "typing");
       const aiResponse = await generateAIResponse(text, chatId, userId);
       await bot.sendMessage(chatId, `🤖 ${aiResponse}`);
@@ -750,14 +965,29 @@ export default async function handler(event) {
       { status: 200, headers: { "Content-Type": "application/json" } }
     );
   } catch (error) {
-    console.error("Error:", error);
+    console.error("Handler Error:", error);
+
+    // Graceful error response
+    const errorMessage = error instanceof BotError
+      ? error.message
+      : "Internal Server Error";
 
     return new Response(
       JSON.stringify({
-        message: "Internal Server Error",
-        error: error.message,
+        message: errorMessage,
+        error: process.env.NODE_ENV === "development" ? error.message : undefined,
       }),
-      { status: 500, headers: { "Content-Type": "application/json" } }
+      {
+        status: error instanceof BotError ? error.statusCode : 500,
+        headers: { "Content-Type": "application/json" },
+      }
     );
   }
 }
+
+// Graceful shutdown
+process.on("SIGTERM", async () => {
+  console.log("SIGTERM received, closing database connection...");
+  await dbManager.disconnect();
+  process.exit(0);
+});
