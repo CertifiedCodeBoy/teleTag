@@ -32,3 +32,19 @@ app.get('/', (req, res) => {
 server = app.listen(port, () => {
   console.log(`Server is running on port ${port}`);
 });
+
+// body parser middleware
+
+// const bodyString = await readStream(event.body); //for Netlify functions
+const bodyString = event.body; // For Express, you can directly access req.body
+
+// const body = JSON.parse(bodyString); // For Netlify functions, 
+const body = bodyString; // For Express, you can directly access req.body
+
+
+// res for the webhook response
+res.status(200).send("OK"); // For Express, send a response directly
+    // return new Response( // For Netlify functions, you can return a Response object
+    //   JSON.stringify({ message: "Message processed successfully" }),
+    //   { status: 200, headers: { "Content-Type": "application/json" } }
+    // );
