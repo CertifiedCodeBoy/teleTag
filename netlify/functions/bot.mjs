@@ -400,7 +400,29 @@ async function generateAIResponse(prompt, chatId, userId) {
     }
 
     const history = await getAIConversation(chatId, userId);
-    let fullPrompt = "You are a helpful AI assistant in a Telegram group chat. Keep responses concise and helpful. ";
+    let fullPrompt = `You are a helpful AI assistant in a Telegram group chat. You should format your responses using Telegram's formatting features:
+
+**Text Formatting Guidelines:**
+- Use **bold text** for emphasis (double asterisks)
+- Use *italic text* for subtle emphasis (single asterisks) 
+- Use \`monospace\` for code, commands, or technical terms (backticks)
+- Use __underlined text__ for important information (double underscores)
+- Use ~~strikethrough~~ when correcting information (double tildes)
+
+**Message Structure:**
+- Use emojis appropriately to make responses engaging 📝
+- Break long responses into clear sections
+- Use bullet points or numbered lists when listing items
+- Keep responses concise but helpful
+- Use line breaks for better readability
+
+**Telegram Features Awareness:**
+- Remember this is a Telegram chat environment
+- Users can reply to messages, forward them, and use @ mentions
+- Support both group and private chat contexts
+- Be aware of Telegram's bot capabilities
+
+Keep responses conversational and well-formatted. `;
 
     if (history.length > 0) {
       fullPrompt += "Previous conversation:\n";
@@ -433,7 +455,7 @@ async function generateAIResponse(prompt, chatId, userId) {
     // Final check for prompt length with more generous limits
     if (fullPrompt.length > CONFIG.MAX_CONTEXT_LENGTH) {
       // Smart truncation: keep the most recent context
-      const basePrompt = "You are a helpful AI assistant in a Telegram group chat. Keep responses concise and helpful. ";
+      const basePrompt = `You are a helpful AI assistant in a Telegram group chat. Format responses with **bold**, *italic*, \`code\`, and emojis 🤖. Keep responses well-structured and engaging. `;
       const userPrompt = `User: ${sanitizedPrompt}`;
       const availableForHistory = CONFIG.MAX_CONTEXT_LENGTH - basePrompt.length - userPrompt.length - 100;
       
@@ -481,19 +503,19 @@ async function generateAIResponse(prompt, chatId, userId) {
     if (error instanceof BotError) {
       switch (error.code) {
         case "QUOTA_EXCEEDED":
-          return "⚠️ API quota exceeded! You've reached your free tier limit. Please try again tomorrow or upgrade your plan.";
+          return "⚠️ **API quota exceeded!** You've reached your free tier limit. Please try again tomorrow or upgrade your plan.";
         case "RATE_LIMIT":
-          return "⚠️ Too many requests. Please wait a moment before trying again.";
+          return "⚠️ **Too many requests.** Please wait a moment before trying again.";
         case "INVALID_PROMPT":
-          return "❌ Invalid input provided. Please check your message and try again.";
+          return "❌ **Invalid input provided.** Please check your message and try again.";
         case "PROMPT_TOO_LONG":
-          return "❌ Your message is too long. Please keep it under 30,000 characters.";
+          return "❌ **Your message is too long.** Please keep it under 30,000 characters.";
         default:
-          return "Sorry, I'm having trouble processing your request right now.";
+          return "😔 Sorry, I'm having trouble processing your request right now.";
       }
     }
 
-    return "Sorry, I'm having trouble processing your request right now.";
+    return "😔 Sorry, I'm having trouble processing your request right now.";
   }
 }
 
@@ -539,7 +561,15 @@ async function translateText(text) {
     
     const translations = [];
     for (const chunk of chunks) {
-      const prompt = `Translate the following text to English. If it's already in English, translate to Arabic. Only provide the translation:\n\n${chunk}`;
+      const prompt = `You are a Telegram bot translator. Translate the following text to English. If it's already in English, translate to Arabic. 
+
+**Important formatting rules:**
+- Preserve any Telegram formatting (bold, italic, code blocks)
+- Only provide the translation, nothing else
+- Keep the same structure and formatting
+
+Text to translate:
+${chunk}`;
       const translation = await callGeminiAPI(prompt);
       translations.push(translation);
     }
@@ -547,7 +577,15 @@ async function translateText(text) {
     return translations.join(' ');
   }
   
-  const prompt = `Translate the following text to English. If it's already in English, translate to Arabic. Only provide the translation:\n\n${sanitized}`;
+  const prompt = `You are a Telegram bot translator. Translate the following text to English. If it's already in English, translate to Arabic. 
+
+**Important formatting rules:**
+- Preserve any Telegram formatting (**bold**, *italic*, \`code\`)
+- Only provide the translation, nothing else
+- Keep the same structure and formatting
+
+Text to translate:
+${sanitized}`;
   return await callGeminiAPI(prompt);
 }
 
@@ -556,11 +594,30 @@ async function summarizeText(text) {
   
   // Handle very long texts with more detailed summarization instructions
   if (sanitized.length > 20000) {
-    const prompt = `Provide a comprehensive summary of the following long text. Break it down into key points and main themes:\n\n${sanitized}`;
+    const prompt = `You are a Telegram bot summarizer. Provide a comprehensive summary of the following long text.
+
+**Formatting requirements:**
+- Use **bold** for main points
+- Use *italic* for supporting details
+- Use bullet points with • for lists
+- Add relevant emojis 📝
+- Structure the summary clearly
+
+Text to summarize:
+${sanitized}`;
     return await callGeminiAPI(prompt);
   }
   
-  const prompt = `Summarize the following text in a concise way, highlighting the main points:\n\n${sanitized}`;
+  const prompt = `You are a Telegram bot summarizer. Summarize the following text concisely.
+
+**Formatting requirements:**
+- Use **bold** for key points
+- Use *italic* for details
+- Add relevant emojis 📋
+- Keep it well-structured and readable
+
+Text to summarize:
+${sanitized}`;
   return await callGeminiAPI(prompt);
 }
 
@@ -670,7 +727,8 @@ async function staticCommands(text, chatId, userId, msg) {
     if (sanitizedText === "/start" || sanitizedText === "/start@tagallesisbabot") {
       await bot.sendMessage(
         chatId,
-        "Hello! I'm your AI-powered group assistant. Use /join to join the group or /ask to chat with me!"
+        "👋 **Hello!** I'm your AI-powered group assistant.\n\n🔹 Use `/join` to join the group\n🔹 Use `/ask` to chat with me\n🔹 Use `/help` to see all commands\n\n*Let's get started!* 🚀",
+        { parse_mode: "Markdown" }
       );
     }
 
@@ -681,9 +739,9 @@ async function staticCommands(text, chatId, userId, msg) {
       if (!groupData.members.some((member) => member.id === userId)) {
         groupData.members.push(user);
         await updateGroupMembers(chatId, groupData.members);
-        await bot.sendMessage(chatId, "You have joined the group!");
+        await bot.sendMessage(chatId, `✅ **Welcome aboard!** You have successfully joined the group, *${user.first_name}*! 🎉`, { parse_mode: "Markdown" });
       } else {
-        await bot.sendMessage(chatId, "You are already a member!");
+        await bot.sendMessage(chatId, `ℹ️ **Already a member!** You're already part of our group, *${user.first_name}*! 😊`, { parse_mode: "Markdown" });
       }
     }
 
@@ -694,20 +752,25 @@ async function staticCommands(text, chatId, userId, msg) {
       );
 
       if (userIndex !== -1) {
+        const userName = groupData.members[userIndex].first_name;
         groupData.members.splice(userIndex, 1);
         await updateGroupMembers(chatId, groupData.members);
-        await bot.sendMessage(chatId, "You have left the group!");
+        await bot.sendMessage(chatId, `👋 **Goodbye!** *${userName}* has left the group. We'll miss you! 😢`, { parse_mode: "Markdown" });
       } else {
-        await bot.sendMessage(chatId, "You are not a member!");
+        await bot.sendMessage(chatId, "❌ **Not a member!** You weren't part of the group to begin with. 🤔", { parse_mode: "Markdown" });
       }
     }
 
     if (sanitizedText === "/showmembers" || sanitizedText === "/showmembers@tagallesisbabot") {
       const groupData = await getGroupMembers(chatId);
-      const membersMessage = groupData.members.length
-        ? groupData.members.map((member) => member.first_name).join(", ")
-        : "No members found.";
-      await bot.sendMessage(chatId, membersMessage);
+      if (groupData.members.length > 0) {
+        const membersList = groupData.members.map((member, index) => 
+          `${index + 1}. *${member.first_name}*`
+        ).join("\n");
+        await bot.sendMessage(chatId, `👥 **Group Members** (${groupData.members.length})\n\n${membersList}`, { parse_mode: "Markdown" });
+      } else {
+        await bot.sendMessage(chatId, "📭 **No members found.** The group is currently empty.", { parse_mode: "Markdown" });
+      }
     }
 
     if (sanitizedText === "/mentionall" || sanitizedText === "/mentionall@tagallesisbabot") {
@@ -717,8 +780,8 @@ async function staticCommands(text, chatId, userId, msg) {
       );
 
       const message = mentions.length
-        ? mentions.join(" ")
-        : "No members to mention.";
+        ? `🔔 **Attention everyone!**\n\n${mentions.join(" ")}\n\n*You've been summoned!* ⚡`
+        : "📭 **No members to mention.** The group is currently empty.";
       await bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
     }
 
@@ -729,18 +792,22 @@ async function staticCommands(text, chatId, userId, msg) {
       if (!helpersData.helpers.some((h) => h.id === userId)) {
         helpersData.helpers.push(helper);
         await updateHelpers(chatId, helpersData.helpers);
-        await bot.sendMessage(chatId, "You have joined the helpers!");
+        await bot.sendMessage(chatId, `🆘 **New Helper!** *${helper.first_name}* has joined the helpers team! 🙋‍♂️`, { parse_mode: "Markdown" });
       } else {
-        await bot.sendMessage(chatId, "You are already a helper!");
+        await bot.sendMessage(chatId, `ℹ️ **Already helping!** You're already part of our helpers team, *${helper.first_name}*! 👨‍🔧`, { parse_mode: "Markdown" });
       }
     }
 
     if (sanitizedText === "/showhelpers" || sanitizedText === "/showhelpers@tagallesisbabot") {
       const helpersData = await getHelpers(chatId);
-      const helpersMessage = helpersData.helpers.length
-        ? helpersData.helpers.map((helper) => helper.first_name).join(", ")
-        : "No helpers found.";
-      await bot.sendMessage(chatId, helpersMessage);
+      if (helpersData.helpers.length > 0) {
+        const helpersList = helpersData.helpers.map((helper, index) => 
+          `${index + 1}. *${helper.first_name}* 🆘`
+        ).join("\n");
+        await bot.sendMessage(chatId, `🆘 **Available Helpers** (${helpersData.helpers.length})\n\n${helpersList}\n\n*These members are ready to help!*`, { parse_mode: "Markdown" });
+      } else {
+        await bot.sendMessage(chatId, "📭 **No helpers found.** No one is currently available to help.", { parse_mode: "Markdown" });
+      }
     }
 
     if (sanitizedText === "/leavehelpers" || sanitizedText === "/leavehelpers@tagallesisbabot") {
@@ -750,11 +817,12 @@ async function staticCommands(text, chatId, userId, msg) {
       );
 
       if (userIndex !== -1) {
+        const helperName = helpersData.helpers[userIndex].first_name;
         helpersData.helpers.splice(userIndex, 1);
         await updateHelpers(chatId, helpersData.helpers);
-        await bot.sendMessage(chatId, "You have left the helpers!");
+        await bot.sendMessage(chatId, `👋 **Helper departure!** *${helperName}* has left the helpers team. Thanks for your service! 🙏`, { parse_mode: "Markdown" });
       } else {
-        await bot.sendMessage(chatId, "You are not a helper!");
+        await bot.sendMessage(chatId, "❌ **Not a helper!** You weren't part of the helpers team. 🤷‍♂️", { parse_mode: "Markdown" });
       }
     }
 
@@ -764,29 +832,31 @@ async function staticCommands(text, chatId, userId, msg) {
         (helper) => `[${helper.first_name}](tg://user?id=${helper.id})`
       );
       const message = mentions.length
-        ? mentions.join(" ")
-        : "No helpers available right now.";
+        ? `🆘 **Help requested!**\n\n${mentions.join(" ")}\n\n*Someone needs assistance!* 🚨`
+        : "📭 **No helpers available right now.** Try again later or ask in the group! 🤝";
       await bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
     }
 
     if (sanitizedText === "/reminders" || sanitizedText === "/reminders@tagallesisbabot") {
       const remindersData = await getReminders(chatId);
-      const remindersMessage = remindersData.reminders.length
-        ? remindersData.reminders
-            .map(
-              (reminder, index) =>
-                `${index + 1}. ${reminder.text} - ${new Date(
-                  reminder.date
-                ).toLocaleDateString("fr-dz", {
-                  weekday: "long",
-                  day: "numeric",
-                  month: "long",
-                  year: "numeric",
-                })}`
-            )
-            .join("\n")
-        : "No reminders found.";
-      await bot.sendMessage(chatId, remindersMessage);
+      if (remindersData.reminders.length > 0) {
+        const remindersList = remindersData.reminders
+          .map(
+            (reminder, index) =>
+              `${index + 1}. **${reminder.text}**\n   📅 *${new Date(
+                reminder.date
+              ).toLocaleDateString("en-US", {
+                weekday: "long",
+                day: "numeric",
+                month: "long",
+                year: "numeric",
+              })}*`
+          )
+          .join("\n\n");
+        await bot.sendMessage(chatId, `⏰ **Active Reminders** (${remindersData.reminders.length})\n\n${remindersList}`, { parse_mode: "Markdown" });
+      } else {
+        await bot.sendMessage(chatId, "📭 **No reminders found.** You haven't set any reminders yet.", { parse_mode: "Markdown" });
+      }
     }
 
     if (
@@ -794,25 +864,26 @@ async function staticCommands(text, chatId, userId, msg) {
       sanitizedText === "/clearreminders@tagallesisbabot"
     ) {
       await updateReminders(chatId, []);
-      await bot.sendMessage(chatId, "Reminders cleared");
+      await bot.sendMessage(chatId, "🗑️ **Reminders cleared!** All reminders have been deleted. ✨", { parse_mode: "Markdown" });
     }
 
     // AI Commands
     if (sanitizedText === "/clearai" || sanitizedText === "/clearai@tagallesisbabot") {
       const collection = dbManager.getCollection("aiConversations");
       await collection.deleteOne({ chatId, userId });
-      await bot.sendMessage(chatId, "🤖 AI conversation history cleared!");
+      await bot.sendMessage(chatId, "🤖 **AI memory cleared!** Our conversation history has been reset. Starting fresh! 🔄", { parse_mode: "Markdown" });
     }
 
     if (sanitizedText === "/translate" || sanitizedText === "/translate@tagallesisbabot") {
       if (msg.reply_to_message && msg.reply_to_message.text) {
         await bot.sendChatAction(chatId, "typing");
         const translation = await translateText(msg.reply_to_message.text);
-        await bot.sendMessage(chatId, `🌐 Translation:\n${translation}`);
+        await bot.sendMessage(chatId, `🌐 **Translation:**\n\n${translation}`, { parse_mode: "Markdown" });
       } else {
         await bot.sendMessage(
           chatId,
-          "Please reply to a message to translate it."
+          "❓ **How to translate:** Reply to a message with `/translate` to translate it! 🔄",
+          { parse_mode: "Markdown" }
         );
       }
     }
@@ -821,11 +892,12 @@ async function staticCommands(text, chatId, userId, msg) {
       if (msg.reply_to_message && msg.reply_to_message.text) {
         await bot.sendChatAction(chatId, "typing");
         const summary = await summarizeText(msg.reply_to_message.text);
-        await bot.sendMessage(chatId, `📝 Summary:\n${summary}`);
+        await bot.sendMessage(chatId, `📝 **Summary:**\n\n${summary}`, { parse_mode: "Markdown" });
       } else {
         await bot.sendMessage(
           chatId,
-          "Please reply to a message to summarize it."
+          "❓ **How to summarize:** Reply to a message with `/summarize` to get a summary! 📋",
+          { parse_mode: "Markdown" }
         );
       }
     }
@@ -838,7 +910,8 @@ async function staticCommands(text, chatId, userId, msg) {
       await collection.deleteMany({ chatId });
       await bot.sendMessage(
         chatId,
-        "Bot has been completely reset (including AI conversations)."
+        "🔄 **Complete Reset!** \n\n✅ All members cleared\n✅ All helpers cleared\n✅ All reminders cleared\n✅ AI conversations cleared\n\n*Starting fresh!* 🚀",
+        { parse_mode: "Markdown" }
       );
     }
 
@@ -856,34 +929,34 @@ async function staticCommands(text, chatId, userId, msg) {
 📊 **API Usage Information**
 
 🔑 **API Status**: ${apiStatus.status === "active" ? "✅ Active" : "❌ Error"}
-🤖 **Available Models**: ${apiStatus.models}
-📈 **Today's Requests**: ${todayUsage}
+🤖 **Available Models**: \`${apiStatus.models}\`
+📈 **Today's Requests**: \`${todayUsage}\`
 
-📋 **Free Tier Limits** (Gemini):
-• 15 requests per minute
-• 1,500 requests per day
-• 1 million tokens per day
+📋 **Free Tier Limits** _(Gemini)_:
+• \`15\` requests per minute
+• \`1,500\` requests per day  
+• \`1 million\` tokens per day
 
 💡 **Performance Features**:
-• Rate limiting: ${CONFIG.RATE_LIMIT.max} requests per minute
-• Caching enabled for faster responses
-• Automatic retry on failures
+• **Rate limiting**: \`${CONFIG.RATE_LIMIT.max}\` requests per minute
+• **Caching** enabled for faster responses ⚡
+• **Automatic retry** on failures 🔄
 
 ⚠️ **Important**: Check Google AI Studio Console for accurate quota info.
-Visit: https://aistudio.google.com/
+🔗 **Visit**: https://aistudio.google.com/
 
-${apiStatus.message}
+📝 *${apiStatus.message}*
         `;
 
         await bot.sendMessage(chatId, creditsMessage, { parse_mode: "Markdown" });
       } catch (error) {
         console.error("Credits command error:", error);
-        await bot.sendMessage(chatId, "❌ Unable to fetch API information right now.");
+        await bot.sendMessage(chatId, "❌ **Error!** Unable to fetch API information right now. Please try again later. 🔄", { parse_mode: "Markdown" });
       }
     }
   } catch (error) {
     console.error("Error in staticCommands:", error);
-    await bot.sendMessage(chatId, "❌ An error occurred while processing your command.");
+    await bot.sendMessage(chatId, "❌ **Oops!** An error occurred while processing your command. Please try again! 🔧", { parse_mode: "Markdown" });
   }
 }
 
@@ -916,22 +989,23 @@ export default async function handler(event) {
       if (question.trim()) {
         // Check message length before processing - now more generous
         if (question.length > CONFIG.MAX_PROMPT_LENGTH) {
-          await bot.sendMessage(chatId, "❌ Your question is too long. Please keep it under 30,000 characters.");
+          await bot.sendMessage(chatId, "❌ **Question too long!** Please keep it under 30,000 characters. 📏", { parse_mode: "Markdown" });
           return new Response(JSON.stringify({ message: "Question too long" }), { status: 200 });
         }
 
         if (!checkRateLimit(userId)) {
-          await bot.sendMessage(chatId, "⚠️ Rate limit exceeded. Please wait a moment before asking another question.");
+          await bot.sendMessage(chatId, "⚠️ **Rate limit exceeded!** Please wait a moment before asking another question. ⏳", { parse_mode: "Markdown" });
           return new Response(JSON.stringify({ message: "Rate limited" }), { status: 200 });
         }
 
         await bot.sendChatAction(chatId, "typing");
         const aiResponse = await generateAIResponse(question, chatId, userId);
-        await bot.sendMessage(chatId, `🤖 ${aiResponse}`);
+        await bot.sendMessage(chatId, `🤖 ${aiResponse}`, { parse_mode: "Markdown" });
       } else {
         await bot.sendMessage(
           chatId,
-          "Please ask a question after /ask. Example: /ask What is the weather like?"
+          "❓ **How to ask:** Use `/ask` followed by your question!\n\n*Example:* `/ask What is the weather like?` 🌤️",
+          { parse_mode: "Markdown" }
         );
       }
     }
@@ -946,7 +1020,7 @@ export default async function handler(event) {
     ) {
       // Check message length before processing - now more generous
       if (text.length > CONFIG.MAX_PROMPT_LENGTH) {
-        await bot.sendMessage(chatId, "❌ Your message is too long. Please keep it under 30,000 characters.");
+        await bot.sendMessage(chatId, "❌ **Message too long!** Please keep it under 30,000 characters. 📏", { parse_mode: "Markdown" });
         return new Response(JSON.stringify({ message: "Message too long" }), { status: 200 });
       }
 
@@ -956,7 +1030,7 @@ export default async function handler(event) {
 
       await bot.sendChatAction(chatId, "typing");
       const aiResponse = await generateAIResponse(text, chatId, userId);
-      await bot.sendMessage(chatId, `🤖 ${aiResponse}`);
+      await bot.sendMessage(chatId, `🤖 ${aiResponse}`, { parse_mode: "Markdown" });
     }
 
     // Reminder system (existing)
