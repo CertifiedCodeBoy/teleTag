@@ -27,4 +27,5 @@ if (alreadysetcommands.length !== commands.length) {
 
 
 bot.on("message", async (msg) => {
+  console.log(`Received message: ${msg.text} from ${msg.from.username || msg.from.id}`);
 });
