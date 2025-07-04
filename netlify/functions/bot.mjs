@@ -9,11 +9,19 @@ const bot = new TelegramBot(process.env.TOKEN);
 const mongoClient = new MongoClient(process.env.MONGO_URI);
 let db;
 
-// AI Helper Functions
+// AI Helper Functions - Updated to match your working GeminiService
 async function callGeminiAPI(prompt) {
   try {
+    // Check if API key exists
+    if (!process.env.GEMINI_API_KEY) {
+      throw new Error('GEMINI_API_KEY not found in environment variables');
+    }
+
+    const model = "gemini-1.5-flash"; // Using the same model as your working service
+    const baseURL = "https://generativelanguage.googleapis.com/v1beta/models";
+
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      `${baseURL}/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
         method: "POST",
         headers: {
@@ -31,22 +39,62 @@ async function callGeminiAPI(prompt) {
           ],
           generationConfig: {
             temperature: 0.7,
-            topK: 40,
-            topP: 0.95,
-            maxOutputTokens: 1000,
+            topP: 0.9,
+            maxOutputTokens: 500,
+            responseMimeType: "text/plain",
           },
+          safetySettings: [
+            {
+              category: "HARM_CATEGORY_HARASSMENT",
+              threshold: "BLOCK_MEDIUM_AND_ABOVE",
+            },
+            {
+              category: "HARM_CATEGORY_HATE_SPEECH",
+              threshold: "BLOCK_MEDIUM_AND_ABOVE",
+            },
+            {
+              category: "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+              threshold: "BLOCK_MEDIUM_AND_ABOVE",
+            },
+            {
+              category: "HARM_CATEGORY_DANGEROUS_CONTENT",
+              threshold: "BLOCK_MEDIUM_AND_ABOVE",
+            },
+          ],
         }),
       }
     );
 
     if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
+      const errorData = await response.json();
+      console.error("Gemini API Error:", errorData);
+      throw new Error(
+        `Gemini API error: ${response.status} - ${
+          errorData.error?.message || "Unknown error"
+        }`
+      );
     }
 
     const data = await response.json();
-    return data.candidates[0].content.parts[0].text;
+    
+    if (!data.candidates || data.candidates.length === 0) {
+      throw new Error("No response generated from Gemini API");
+    }
+
+    const responseText = data.candidates[0].content.parts[0].text;
+    return responseText;
+
   } catch (error) {
     console.error("Gemini API Error:", error);
+    
+    if (error.message.includes("API key")) {
+      return "Invalid Gemini API key. Please check your configuration.";
+    } else if (error.message.includes("quota")) {
+      return "Gemini API quota exceeded. Please try again later.";
+    } else if (error.message.includes("network")) {
+      return "Network error connecting to Gemini API. Please check your internet connection.";
+    }
+    
     return "Sorry, I'm having trouble processing your request right now. Please try again later.";
   }
 }
@@ -153,8 +201,7 @@ async function generateAIResponse(prompt, chatId, userId) {
     const history = await getAIConversation(chatId, userId);
 
     // Build context with history
-    let fullPrompt =
-      "You are a helpful AI assistant in a Telegram group chat. ";
+    let fullPrompt = "You are a helpful AI assistant in a Telegram group chat. ";
 
     if (history.length > 0) {
       fullPrompt += "Previous conversation:\n";
@@ -168,14 +215,17 @@ async function generateAIResponse(prompt, chatId, userId) {
 
     const aiResponse = await callGeminiAPI(fullPrompt);
 
-    // Update conversation history
-    const newMessages = [
-      ...history,
-      { role: "user", content: prompt, timestamp: new Date() },
-      { role: "assistant", content: aiResponse, timestamp: new Date() },
-    ].slice(-20); // Keep last 20 messages
+    // Only save conversation if we got a valid response
+    if (aiResponse && !aiResponse.includes("Sorry, I'm having trouble")) {
+      // Update conversation history
+      const newMessages = [
+        ...history,
+        { role: "user", content: prompt, timestamp: new Date() },
+        { role: "assistant", content: aiResponse, timestamp: new Date() },
+      ].slice(-20); // Keep last 20 messages
 
-    await saveAIConversation(chatId, userId, newMessages);
+      await saveAIConversation(chatId, userId, newMessages);
+    }
 
     return aiResponse;
   } catch (error) {
@@ -444,11 +494,8 @@ async function staticCommands(text, chatId, userId, msg) {
 
 export default async function handler(event, res) {
   try {
-    const bodyString = await readStream(event.body); //for Netlify functions
-    // const bodyString = event.body; // For Express, you can directly access req.body
-
-    const body = JSON.parse(bodyString); // For Netlify functions,
-    // const body = bodyString; // For Express, you can directly access req.body
+    const bodyString = await readStream(event.body);
+    const body = JSON.parse(bodyString);
 
     const msg = body.message;
     if (!msg || !msg.text) {
@@ -591,11 +638,10 @@ export default async function handler(event, res) {
       }
     }
 
-    // res.status(200).send("OK"); // For Express, send a response directly
     return new Response(
       JSON.stringify({ message: "Message processed successfully" }),
       { status: 200, headers: { "Content-Type": "application/json" } }
-    ); // For Netlify functions, you can return a Response object
+    );
   } catch (error) {
     console.error("Error:", error);
 
