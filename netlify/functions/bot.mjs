@@ -107,30 +107,27 @@ async function connectToDatabase() {
       console.log("Connected to MongoDB");
     } catch (err) {
       console.error("Error connecting to MongoDB", err);
+      throw err;
     }
   }
+  return db;
 }
 
-async function exampleFunction() {
+// Ensure database is connected before using collections
+const membersCollection = async () => {
   await connectToDatabase();
-}
-
-exampleFunction();
-
-const membersCollection = () => {
-  if (!db) throw new Error("Database not initialized");
   return db.collection("groupMembers");
 };
-const helpersCollection = () => {
-  if (!db) throw new Error("Database not initialized");
+const helpersCollection = async () => {
+  await connectToDatabase();
   return db.collection("helpers");
 };
-const remindersCollection = () => {
-  if (!db) throw new Error("Database not initialized");
+const remindersCollection = async () => {
+  await connectToDatabase();
   return db.collection("reminders");
 };
-const aiConversationsCollection = () => {
-  if (!db) throw new Error("Database not initialized");
+const aiConversationsCollection = async () => {
+  await connectToDatabase();
   return db.collection("aiConversations");
 };
 
@@ -163,24 +160,31 @@ const commands = [
   { command: "clearai", description: "Clear AI conversation history" },
 ];
 
-const alreadysetcommands = await bot.getMyCommands();
+// Initialize bot commands after ensuring database connection
+async function initializeBot() {
+  try {
+    await connectToDatabase();
+    
+    const alreadysetcommands = await bot.getMyCommands();
 
-if (alreadysetcommands.length !== commands.length) {
-  bot
-    .setMyCommands(commands)
-    .then(() => {
+    if (alreadysetcommands.length !== commands.length) {
+      await bot.setMyCommands(commands);
       console.log("Bot commands set successfully");
-    })
-    .catch((error) => {
-      console.error("Error setting bot commands:", error);
-    });
-} else {
-  console.log("Commands already set");
+    } else {
+      console.log("Commands already set");
+    }
+  } catch (error) {
+    console.error("Error initializing bot:", error);
+  }
 }
+
+// Initialize bot
+initializeBot();
 
 // AI Helper Functions
 async function getAIConversation(chatId, userId) {
-  const conversation = await aiConversationsCollection().findOne({
+  const collection = await aiConversationsCollection();
+  const conversation = await collection.findOne({
     chatId,
     userId,
   });
@@ -188,7 +192,8 @@ async function getAIConversation(chatId, userId) {
 }
 
 async function saveAIConversation(chatId, userId, messages) {
-  await aiConversationsCollection().updateOne(
+  const collection = await aiConversationsCollection();
+  await collection.updateOne(
     { chatId, userId },
     { $set: { messages, lastUpdated: new Date() } },
     { upsert: true }
@@ -246,12 +251,14 @@ async function summarizeText(text) {
 
 // Helper Functions
 async function getGroupMembers(chatId) {
-  const groupData = await membersCollection().findOne({ chatId });
+  const collection = await membersCollection();
+  const groupData = await collection.findOne({ chatId });
   return groupData || { chatId, members: [] };
 }
 
 async function updateGroupMembers(chatId, members) {
-  return membersCollection().updateOne(
+  const collection = await membersCollection();
+  return collection.updateOne(
     { chatId },
     { $set: { members } },
     { upsert: true }
@@ -259,12 +266,14 @@ async function updateGroupMembers(chatId, members) {
 }
 
 async function getHelpers(chatId) {
-  const helpersData = await helpersCollection().findOne({ chatId });
+  const collection = await helpersCollection();
+  const helpersData = await collection.findOne({ chatId });
   return helpersData || { chatId, helpers: [] };
 }
 
 async function updateHelpers(chatId, helpers) {
-  return helpersCollection().updateOne(
+  const collection = await helpersCollection();
+  return collection.updateOne(
     { chatId },
     { $set: { helpers } },
     { upsert: true }
@@ -272,12 +281,14 @@ async function updateHelpers(chatId, helpers) {
 }
 
 async function getReminders(chatId) {
-  const remindersData = await remindersCollection().findOne({ chatId });
+  const collection = await remindersCollection();
+  const remindersData = await collection.findOne({ chatId });
   return remindersData || { chatId, reminders: [] };
 }
 
 async function updateReminders(chatId, reminders) {
-  return remindersCollection().updateOne(
+  const collection = await remindersCollection();
+  return collection.updateOne(
     { chatId },
     { $set: { reminders } },
     { upsert: true }
@@ -450,7 +461,8 @@ async function staticCommands(text, chatId, userId, msg) {
 
   // AI Commands
   if (text === "/clearai" || text === "/clearai@tagallesisbabot") {
-    await aiConversationsCollection().deleteOne({ chatId, userId });
+    const collection = await aiConversationsCollection();
+    await collection.deleteOne({ chatId, userId });
     await bot.sendMessage(chatId, "🤖 AI conversation history cleared!");
   }
 
@@ -484,7 +496,8 @@ async function staticCommands(text, chatId, userId, msg) {
     await updateGroupMembers(chatId, []);
     await updateHelpers(chatId, []);
     await updateReminders(chatId, []);
-    await aiConversationsCollection().deleteMany({ chatId });
+    const collection = await aiConversationsCollection();
+    await collection.deleteMany({ chatId });
     await bot.sendMessage(
       chatId,
       "Bot has been completely reset (including AI conversations)."
@@ -492,8 +505,11 @@ async function staticCommands(text, chatId, userId, msg) {
   }
 }
 
-export default async function handler(event, res) {
+export default async function handler(event) {
   try {
+    // Ensure database is connected at the start of each request
+    await connectToDatabase();
+    
     const bodyString = await readStream(event.body);
     const body = JSON.parse(bodyString);
 
