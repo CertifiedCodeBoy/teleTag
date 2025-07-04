@@ -12,12 +12,15 @@ let db;
 // AI Helper Functions - Updated to match your working GeminiService
 async function callGeminiAPI(prompt) {
   try {
+    // Track usage
+    trackAPIUsage();
+    
     // Check if API key exists
     if (!process.env.GEMINI_API_KEY) {
       throw new Error('GEMINI_API_KEY not found in environment variables');
     }
 
-    const model = "gemini-1.5-flash"; // Using the same model as your working service
+    const model = "gemini-1.5-flash";
     const baseURL = "https://generativelanguage.googleapis.com/v1beta/models";
 
     const response = await fetch(
@@ -68,6 +71,12 @@ async function callGeminiAPI(prompt) {
     if (!response.ok) {
       const errorData = await response.json();
       console.error("Gemini API Error:", errorData);
+      
+      // Check if it's a quota exceeded error
+      if (response.status === 429 || errorData.error?.message?.includes("quota")) {
+        throw new Error("QUOTA_EXCEEDED");
+      }
+      
       throw new Error(
         `Gemini API error: ${response.status} - ${
           errorData.error?.message || "Unknown error"
@@ -87,10 +96,10 @@ async function callGeminiAPI(prompt) {
   } catch (error) {
     console.error("Gemini API Error:", error);
     
-    if (error.message.includes("API key")) {
+    if (error.message === "QUOTA_EXCEEDED") {
+      return "⚠️ API quota exceeded! You've reached your free tier limit. Please try again tomorrow or upgrade your plan.";
+    } else if (error.message.includes("API key")) {
       return "Invalid Gemini API key. Please check your configuration.";
-    } else if (error.message.includes("quota")) {
-      return "Gemini API quota exceeded. Please try again later.";
     } else if (error.message.includes("network")) {
       return "Network error connecting to Gemini API. Please check your internet connection.";
     }
@@ -158,6 +167,7 @@ const commands = [
   { command: "translate", description: "Translate text (reply to message)" },
   { command: "summarize", description: "Summarize text (reply to message)" },
   { command: "clearai", description: "Clear AI conversation history" },
+  { command: "credits", description: "Check API usage information" }, // Add this line
 ];
 
 // Initialize bot commands after ensuring database connection
@@ -326,6 +336,51 @@ function isValidDate(date) {
   if (inputDate.getMonth() !== month - 1) return false;
 
   return true;
+}
+
+let dailyUsageCounter = 0;
+let lastResetDate = new Date().toDateString();
+
+function trackAPIUsage() {
+  const today = new Date().toDateString();
+  if (today !== lastResetDate) {
+    dailyUsageCounter = 0;
+    lastResetDate = today;
+  }
+  dailyUsageCounter++;
+}
+
+// Add this function to check API status
+async function checkGeminiAPIStatus() {
+  try {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GEMINI_API_KEY}`,
+      {
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`API Status Check Failed: ${response.status}`);
+    }
+
+    const data = await response.json();
+    return {
+      status: "active",
+      models: data.models?.length || 0,
+      message: "API key is working correctly"
+    };
+  } catch (error) {
+    console.error("API Status Check Error:", error);
+    return {
+      status: "error",
+      models: 0,
+      message: error.message
+    };
+  }
 }
 
 async function staticCommands(text, chatId, userId, msg) {
@@ -502,6 +557,42 @@ async function staticCommands(text, chatId, userId, msg) {
       chatId,
       "Bot has been completely reset (including AI conversations)."
     );
+  }
+
+  // Add credits command
+  if (text === "/credits" || text === "/credits@tagallesisbabot") {
+    try {
+      await bot.sendChatAction(chatId, "typing");
+      
+      const apiStatus = await checkGeminiAPIStatus();
+      
+      const creditsMessage = `
+📊 **API Usage Information**
+
+🔑 **API Status**: ${apiStatus.status === 'active' ? '✅ Active' : '❌ Error'}
+🤖 **Available Models**: ${apiStatus.models}
+📈 **Today's Requests**: ${dailyUsageCounter}
+
+📋 **Free Tier Limits** (Gemini):
+• 15 requests per minute
+• 1,500 requests per day
+• 1 million tokens per day
+
+💡 **Tips to Monitor Usage**:
+• Check Google AI Studio Console
+• Visit: https://aistudio.google.com/
+• Go to "API Keys" section for usage stats
+
+⚠️ **Important**: This bot tracks requests locally (resets daily). For accurate quota info, check Google AI Studio.
+
+${apiStatus.message}
+      `;
+      
+      await bot.sendMessage(chatId, creditsMessage, { parse_mode: "Markdown" });
+    } catch (error) {
+      console.error("Credits command error:", error);
+      await bot.sendMessage(chatId, "❌ Unable to fetch API information right now.");
+    }
   }
 }
 
