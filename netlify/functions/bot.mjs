@@ -13,6 +13,7 @@ const CONFIG = {
   CACHE_TTL: 5 * 60 * 1000, // 5 minutes
   MAX_CONVERSATION_HISTORY: 20,
   MAX_MESSAGE_LENGTH: 4000,
+  MAX_PROMPT_LENGTH: 2000, // Reduced for better API handling
   RATE_LIMIT: {
     window: 60 * 1000, // 1 minute
     max: 10, // 10 requests per minute per user
@@ -177,7 +178,7 @@ async function callGeminiAPI(prompt, retries = CONFIG.MAX_RETRIES) {
     throw new BotError("Invalid prompt provided", "INVALID_PROMPT", 400);
   }
 
-  if (prompt.length > CONFIG.MAX_MESSAGE_LENGTH) {
+  if (prompt.length > CONFIG.MAX_PROMPT_LENGTH) {
     throw new BotError("Prompt too long", "PROMPT_TOO_LONG", 400);
   }
 
@@ -391,25 +392,44 @@ async function generateAIResponse(prompt, chatId, userId) {
       return "⚠️ Rate limit exceeded. Please wait a moment before sending another request.";
     }
 
+    // Sanitize and truncate prompt early
+    const sanitizedPrompt = sanitizeInput(prompt);
+    if (sanitizedPrompt.length > CONFIG.MAX_PROMPT_LENGTH) {
+      return "❌ Your message is too long. Please keep it under 2000 characters.";
+    }
+
     const history = await getAIConversation(chatId, userId);
     let fullPrompt = "You are a helpful AI assistant in a Telegram group chat. Keep responses concise and helpful. ";
 
     if (history.length > 0) {
       fullPrompt += "Previous conversation:\n";
-      history.slice(-10).forEach((msg) => {
-        fullPrompt += `${msg.role}: ${msg.content}\n`;
+      // Limit history to prevent prompt overflow
+      const recentHistory = history.slice(-5); // Reduced from 10 to 5
+      recentHistory.forEach((msg) => {
+        const truncatedContent = msg.content.substring(0, 100); // Limit each message
+        fullPrompt += `${msg.role}: ${truncatedContent}\n`;
       });
       fullPrompt += "\n";
     }
 
-    fullPrompt += `User: ${prompt}`;
+    fullPrompt += `User: ${sanitizedPrompt}`;
+
+    // Final check for prompt length
+    if (fullPrompt.length > CONFIG.MAX_PROMPT_LENGTH) {
+      // Rebuild with minimal context if still too long
+      fullPrompt = `You are a helpful AI assistant. User: ${sanitizedPrompt}`;
+      
+      if (fullPrompt.length > CONFIG.MAX_PROMPT_LENGTH) {
+        return "❌ Your message is too long even after optimization. Please shorten it.";
+      }
+    }
 
     const aiResponse = await callGeminiAPI(fullPrompt);
 
     if (aiResponse && !aiResponse.includes("Sorry, I'm having trouble")) {
       const newMessages = [
         ...history,
-        { role: "user", content: prompt, timestamp: new Date() },
+        { role: "user", content: sanitizedPrompt, timestamp: new Date() },
         { role: "assistant", content: aiResponse, timestamp: new Date() },
       ];
 
@@ -428,6 +448,8 @@ async function generateAIResponse(prompt, chatId, userId) {
           return "⚠️ Too many requests. Please wait a moment before trying again.";
         case "INVALID_PROMPT":
           return "❌ Invalid input provided. Please check your message and try again.";
+        case "PROMPT_TOO_LONG":
+          return "❌ Your message is too long. Please keep it under 2000 characters.";
         default:
           return "Sorry, I'm having trouble processing your request right now.";
       }
@@ -714,7 +736,7 @@ async function staticCommands(text, chatId, userId, msg) {
 
     // AI Commands
     if (sanitizedText === "/clearai" || sanitizedText === "/clearai@tagallesisbabot") {
-      const collection = await aiConversationsCollection();
+      const collection = dbManager.getCollection("aiConversations");
       await collection.deleteOne({ chatId, userId });
       await bot.sendMessage(chatId, "🤖 AI conversation history cleared!");
     }
@@ -749,7 +771,7 @@ async function staticCommands(text, chatId, userId, msg) {
       await updateGroupMembers(chatId, []);
       await updateHelpers(chatId, []);
       await updateReminders(chatId, []);
-      const collection = await aiConversationsCollection();
+      const collection = dbManager.getCollection("aiConversations");
       await collection.deleteMany({ chatId });
       await bot.sendMessage(
         chatId,
@@ -829,6 +851,12 @@ export default async function handler(event) {
     if (text.startsWith("/ask ") || text.startsWith("/ask@tagallesisbabot ")) {
       const question = text.replace(/^\/ask(@tagallesisbabot)?\s+/, "");
       if (question.trim()) {
+        // Check message length before processing
+        if (question.length > CONFIG.MAX_PROMPT_LENGTH) {
+          await bot.sendMessage(chatId, "❌ Your question is too long. Please keep it under 2000 characters.");
+          return new Response(JSON.stringify({ message: "Question too long" }), { status: 200 });
+        }
+
         if (!checkRateLimit(userId)) {
           await bot.sendMessage(chatId, "⚠️ Rate limit exceeded. Please wait a moment before asking another question.");
           return new Response(JSON.stringify({ message: "Rate limited" }), { status: 200 });
@@ -853,6 +881,12 @@ export default async function handler(event) {
         text.includes("@tagallesisbabot") ||
         msg.reply_to_message?.from?.username === "tagallesisbabot")
     ) {
+      // Check message length before processing
+      if (text.length > CONFIG.MAX_PROMPT_LENGTH) {
+        await bot.sendMessage(chatId, "❌ Your message is too long. Please keep it under 2000 characters.");
+        return new Response(JSON.stringify({ message: "Message too long" }), { status: 200 });
+      }
+
       if (!checkRateLimit(userId)) {
         return new Response(JSON.stringify({ message: "Rate limited" }), { status: 200 });
       }
