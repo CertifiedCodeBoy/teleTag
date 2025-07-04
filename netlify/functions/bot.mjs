@@ -450,16 +450,12 @@ async function staticCommands(text, chatId, userId, msg) {
 
 export default async function handler(event, res) {
   try {
-<<<<<<< HEAD
     // const bodyString = await readStream(event.body);
     const bodyString = event.body;
 
     // const body = JSON.parse(bodyString);
     const body = bodyString;
-=======
-    const bodyString = await readStream(event.body);
-    const body = JSON.parse(bodyString);
->>>>>>> 46eedb9c9184a245a346cffd8caef51ffa1f9a6a
+
 
     const msg = body.message;
     if (!msg || !msg.text) {
@@ -599,18 +595,12 @@ export default async function handler(event, res) {
       }
     }
 
-<<<<<<< HEAD
     res.status(200).send("OK");
     // return new Response(
     //   JSON.stringify({ message: "Message processed successfully" }),
     //   { status: 200, headers: { "Content-Type": "application/json" } }
     // );
-=======
-    return new Response(
-      JSON.stringify({ message: "Message processed successfully" }),
-      { status: 200, headers: { "Content-Type": "application/json" } }
-    );
->>>>>>> 46eedb9c9184a245a346cffd8caef51ffa1f9a6a
+
   } catch (error) {
     console.error("Error:", error);
 
