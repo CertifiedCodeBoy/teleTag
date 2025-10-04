@@ -1012,11 +1012,7 @@ export default async function handler(event) {
 
     // Enhanced smart AI responses
     if (
-      !text.startsWith("/") &&
-      (text.includes("?") ||
-        text.toLowerCase().includes("bot") ||
-        text.includes("@tagallesisbabot") ||
-        msg.reply_to_message?.from?.username === "tagallesisbabot")
+      false
     ) {
       // Check message length before processing - now more generous
       if (text.length > CONFIG.MAX_PROMPT_LENGTH) {
