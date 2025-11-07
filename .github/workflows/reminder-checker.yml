@@ -1,0 +1,40 @@
+name: Check Reminders (Backup System)
+
+on:
+  # Run every hour at minute 0
+  schedule:
+    - cron: '0 * * * *'
+  
+  # Allow manual trigger for testing
+  workflow_dispatch:
+
+jobs:
+  check-reminders:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: deplo
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      
+      - name: Install dependencies
+        run: npm install node-telegram-bot-api dotenv
+      
+      - name: Run reminder checker script
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: node .github/scripts/check-reminders.js
+      
+      - name: Commit updated reminders if changed
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add data/reminders.json
+          git diff --quiet && git diff --staged --quiet || git commit -m "Update reminders - mark as sent [automated]"
+          git push
