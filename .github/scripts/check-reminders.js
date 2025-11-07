@@ -1,66 +1,85 @@
-// GitHub Actions backup script to check and send due reminders
-// Runs independently of Netlify function for redundancy
+// Netlify serverless function to check and send due reminders
+// Triggered by external cron service (cron-job.org)
 
 import TelegramBot from "node-telegram-bot-api";
 import fs from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+// Get directory paths for ES modules
+const __filename_local = fileURLToPath(import.meta.url);
+const __dirname_local = path.dirname(__filename_local);
 
-// Get bot token from environment
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const REMINDERS_FILE = path.join(__dirname_local, "../../data/reminders.json");
 
-if (!BOT_TOKEN) {
-  console.error("ERROR: TELEGRAM_BOT_TOKEN not found in environment");
-  process.exit(1);
+// Storage functions (inline for Netlify function)
+async function ensureDataFile() {
+  try {
+    await fs.access(REMINDERS_FILE);
+  } catch {
+    const dataDir = path.dirname(REMINDERS_FILE);
+    await fs.mkdir(dataDir, { recursive: true });
+    await fs.writeFile(REMINDERS_FILE, "[]");
+  }
 }
 
-// Storage functions (simplified for GitHub Actions)
 async function getRemindersForToday(dateString) {
+  await ensureDataFile();
+  
   try {
-    const remindersPath = path.join(__dirname, "../../data/reminders.json");
-    const data = await fs.readFile(remindersPath, "utf-8");
+    const data = await fs.readFile(REMINDERS_FILE, "utf-8");
     const allReminders = JSON.parse(data);
     
-    // Filter for today's unsent reminders
     return allReminders.filter(
-      (r) => r.date === dateString && r.sent === false
+      (reminder) => reminder.date === dateString && reminder.sent === false
     );
   } catch (error) {
-    console.error("Error reading reminders:", error.message);
+    console.error("Error reading reminders:", error);
     return [];
   }
 }
 
 async function markReminderAsSent(reminderId) {
+  await ensureDataFile();
+  
   try {
-    const remindersPath = path.join(__dirname, "../../data/reminders.json");
-    const data = await fs.readFile(remindersPath, "utf-8");
+    const data = await fs.readFile(REMINDERS_FILE, "utf-8");
     const allReminders = JSON.parse(data);
     
-    // Find and update reminder
     const reminder = allReminders.find((r) => r.id === reminderId);
     if (reminder) {
       reminder.sent = true;
       reminder.sentAt = new Date().toISOString();
+      
+      await fs.writeFile(REMINDERS_FILE, JSON.stringify(allReminders, null, 2));
+      console.log(`Reminder ${reminderId} marked as sent`);
+      return true;
     }
     
-    // Save back to file
-    await fs.writeFile(remindersPath, JSON.stringify(allReminders, null, 2));
-    console.log(`Marked reminder ${reminderId} as sent`);
+    console.warn(`Reminder ${reminderId} not found`);
+    return false;
   } catch (error) {
-    console.error("Error marking reminder as sent:", error.message);
+    console.error("Error marking reminder as sent:", error);
+    return false;
   }
 }
 
-// Main execution
-async function main() {
-  console.log("GitHub Actions reminder checker started at:", new Date().toISOString());
+export async function handler(event, context) {
+  console.log("Check-reminders function triggered at:", new Date().toISOString());
+
+  // Security: Validate token
+  const token = event.queryStringParameters?.token;
+  if (!token || token !== process.env.CRON_SECRET) {
+    console.error("Unauthorized access attempt");
+    return {
+      statusCode: 401,
+      body: JSON.stringify({ error: "Unauthorized" }),
+    };
+  }
 
   try {
-    const bot = new TelegramBot(BOT_TOKEN);
+    // Initialize bot
+    const bot = new TelegramBot(process.env.TOKEN2);
 
     // Get today's date in YYYY-MM-DD format (UTC)
     const today = new Date().toISOString().split("T")[0];
@@ -83,28 +102,31 @@ async function main() {
         // Mark as sent
         await markReminderAsSent(reminder.id);
         sentCount++;
-        console.log(`✓ Sent reminder ${reminder.id} to chat ${reminder.chatId}`);
-        
-        // Small delay to avoid rate limiting
-        await new Promise(resolve => setTimeout(resolve, 100));
+        console.log(`Sent reminder ${reminder.id} to chat ${reminder.chatId}`);
       } catch (error) {
         failedCount++;
-        console.error(`✗ Failed to send reminder ${reminder.id}:`, error.message);
+        console.error(`Failed to send reminder ${reminder.id}:`, error.message);
       }
     }
 
-    console.log("\n=== Summary ===");
-    console.log(`Total reminders: ${reminders.length}`);
-    console.log(`Successfully sent: ${sentCount}`);
-    console.log(`Failed: ${failedCount}`);
-    
-    if (failedCount > 0) {
-      process.exit(1);
-    }
+    return {
+      statusCode: 200,
+      body: JSON.stringify({
+        success: true,
+        checked: new Date().toISOString(),
+        totalReminders: reminders.length,
+        sent: sentCount,
+        failed: failedCount,
+      }),
+    };
   } catch (error) {
-    console.error("Fatal error in reminder checker:", error);
-    process.exit(1);
+    console.error("Error in check-reminders function:", error);
+    return {
+      statusCode: 500,
+      body: JSON.stringify({
+        error: "Internal server error",
+        message: error.message,
+      }),
+    };
   }
 }
-
-main();
