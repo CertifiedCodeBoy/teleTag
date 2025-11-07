@@ -27,20 +27,28 @@ async function getRemindersForToday(dateString) {
     const db = await connectToDatabase();
     const collection = db.collection("reminders");
     
-    // Find all reminders for today that haven't been sent
-    const allReminders = await collection.find({}).toArray();
+    // Find all reminder documents
+    const allReminderDocs = await collection.find({}).toArray();
+    
+    console.log(`Found ${allReminderDocs.length} chat documents`);
     
     const todayReminders = [];
-    for (const doc of allReminders) {
+    
+    for (const doc of allReminderDocs) {
       if (doc.reminders && Array.isArray(doc.reminders)) {
+        console.log(`Chat ${doc.chatId} has ${doc.reminders.length} reminders`);
+        
         for (const reminder of doc.reminders) {
-          if (reminder.date === dateString && !reminder.sent) {
+          console.log(`Checking reminder: date=${reminder.date}, sent=${reminder.sent}, target=${dateString}`);
+          
+          // Check if reminder is for today and hasn't been sent
+          // Note: Your current bot doesn't set 'sent' field, so we check if it's undefined or false
+          if (reminder.date === dateString && (reminder.sent === false || reminder.sent === undefined)) {
             todayReminders.push({
-              id: reminder._id || reminder.date + reminder.text,
               chatId: doc.chatId,
               message: reminder.text,
               date: reminder.date,
-              sent: reminder.sent || false,
+              reminderIndex: doc.reminders.indexOf(reminder)
             });
           }
         }
@@ -59,23 +67,33 @@ async function markReminderAsSent(chatId, reminderDate, reminderText) {
     const db = await connectToDatabase();
     const collection = db.collection("reminders");
     
-    // Update the specific reminder in the array
-    await collection.updateOne(
-      { 
-        chatId: chatId,
-        "reminders.date": reminderDate,
-        "reminders.text": reminderText
-      },
-      {
-        $set: {
-          "reminders.$.sent": true,
-          "reminders.$.sentAt": new Date().toISOString()
-        }
-      }
-    );
+    // Find the chat document
+    const doc = await collection.findOne({ chatId: chatId });
     
-    console.log(`Reminder marked as sent for chat ${chatId}`);
-    return true;
+    if (doc && doc.reminders) {
+      // Find the specific reminder and mark it as sent
+      const updatedReminders = doc.reminders.map(reminder => {
+        if (reminder.date === reminderDate && reminder.text === reminderText) {
+          return {
+            ...reminder,
+            sent: true,
+            sentAt: new Date().toISOString()
+          };
+        }
+        return reminder;
+      });
+      
+      // Update the entire reminders array
+      await collection.updateOne(
+        { chatId: chatId },
+        { $set: { reminders: updatedReminders, lastUpdated: new Date() } }
+      );
+      
+      console.log(`Reminder marked as sent for chat ${chatId}`);
+      return true;
+    }
+    
+    return false;
   } catch (error) {
     console.error("Error marking reminder as sent:", error);
     return false;
