@@ -22,6 +22,24 @@ async function connectToDatabase() {
   return db;
 }
 
+async function getAllReminders() {
+  try {
+    const db = await connectToDatabase();
+    const collection = db.collection("reminders");
+    
+    // Get ALL reminder documents to debug
+    const allDocs = await collection.find({}).toArray();
+    
+    console.log("=== DEBUG: ALL REMINDER DOCUMENTS ===");
+    console.log(JSON.stringify(allDocs, null, 2));
+    
+    return allDocs;
+  } catch (error) {
+    console.error("Error reading all reminders:", error);
+    return [];
+  }
+}
+
 async function getRemindersForToday(dateString) {
   try {
     const db = await connectToDatabase();
@@ -30,30 +48,46 @@ async function getRemindersForToday(dateString) {
     // Find all reminder documents
     const allReminderDocs = await collection.find({}).toArray();
     
-    console.log(`Found ${allReminderDocs.length} chat documents`);
+    console.log(`=== Found ${allReminderDocs.length} chat documents in database ===`);
     
     const todayReminders = [];
     
     for (const doc of allReminderDocs) {
+      console.log(`\n--- Processing chat ${doc.chatId} ---`);
+      console.log(`Document structure:`, JSON.stringify(doc, null, 2));
+      
       if (doc.reminders && Array.isArray(doc.reminders)) {
-        console.log(`Chat ${doc.chatId} has ${doc.reminders.length} reminders`);
+        console.log(`  ✓ Chat ${doc.chatId} has ${doc.reminders.length} reminders`);
         
-        for (const reminder of doc.reminders) {
-          console.log(`Checking reminder: date=${reminder.date}, sent=${reminder.sent}, target=${dateString}`);
+        for (let i = 0; i < doc.reminders.length; i++) {
+          const reminder = doc.reminders[i];
+          console.log(`\n  Reminder #${i + 1}:`);
+          console.log(`    - date: "${reminder.date}" (type: ${typeof reminder.date})`);
+          console.log(`    - target date: "${dateString}" (type: ${typeof dateString})`);
+          console.log(`    - dates match: ${reminder.date === dateString}`);
+          console.log(`    - text: "${reminder.text}"`);
+          console.log(`    - sent field: ${reminder.sent} (type: ${typeof reminder.sent})`);
+          console.log(`    - sent is false or undefined: ${reminder.sent === false || reminder.sent === undefined}`);
           
           // Check if reminder is for today and hasn't been sent
-          // Note: Your current bot doesn't set 'sent' field, so we check if it's undefined or false
           if (reminder.date === dateString && (reminder.sent === false || reminder.sent === undefined)) {
+            console.log(`    ✓ MATCHED! Adding to send list`);
             todayReminders.push({
               chatId: doc.chatId,
               message: reminder.text,
               date: reminder.date,
-              reminderIndex: doc.reminders.indexOf(reminder)
+              reminderIndex: i
             });
+          } else {
+            console.log(`    ✗ Not matched`);
           }
         }
+      } else {
+        console.log(`  ✗ Chat ${doc.chatId} has no reminders array`);
       }
     }
+    
+    console.log(`\n=== SUMMARY: Found ${todayReminders.length} reminders to send ===`);
     
     return todayReminders;
   } catch (error) {
@@ -119,7 +153,10 @@ export async function handler(event, context) {
 
     // Get today's date in YYYY-MM-DD format (UTC)
     const today = new Date().toISOString().split("T")[0];
-    console.log("Checking reminders for date:", today);
+    console.log("=== Checking reminders for date:", today, "===");
+
+    // DEBUG: Get all reminders first
+    const allDocs = await getAllReminders();
 
     // Get unsent reminders for today
     const reminders = await getRemindersForToday(today);
@@ -150,9 +187,18 @@ export async function handler(event, context) {
       body: JSON.stringify({
         success: true,
         checked: new Date().toISOString(),
+        checkedDate: today,
+        totalDocuments: allDocs.length,
         totalReminders: reminders.length,
         sent: sentCount,
         failed: failedCount,
+        debug: {
+          allDocuments: allDocs.map(d => ({
+            chatId: d.chatId,
+            reminderCount: d.reminders?.length || 0,
+            reminders: d.reminders?.map(r => ({ date: r.date, text: r.text?.substring(0, 30) }))
+          }))
+        }
       }),
     };
   } catch (error) {
