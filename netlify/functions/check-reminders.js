@@ -152,8 +152,10 @@ export async function handler(event, context) {
     const bot = new TelegramBot(process.env.TOKEN);
 
     // Get today's date in YYYY-MM-DD format (UTC)
-    const today = new Date().toISOString().split("T")[0];
+    // Allow override with testDate parameter for testing
+    const today = event.queryStringParameters?.testDate || new Date().toISOString().split("T")[0];
     console.log("=== Checking reminders for date:", today, "===");
+    
 
     // DEBUG: Get all reminders first
     const allDocs = await getAllReminders();
