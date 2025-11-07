@@ -2,62 +2,80 @@
 // Triggered by external cron service (cron-job.org)
 
 import TelegramBot from "node-telegram-bot-api";
-import fs from "fs/promises";
-import path from "path";
-import { fileURLToPath } from "url";
+import { MongoClient } from "mongodb";
 
-// Get directory paths for ES modules
-const __filename_local = fileURLToPath(import.meta.url);
-const __dirname_local = path.dirname(__filename_local);
+// MongoDB helper functions
+let cachedDb = null;
 
-const REMINDERS_FILE = path.join(__dirname_local, "../../data/reminders.json");
-
-// Storage functions (inline for Netlify function)
-async function ensureDataFile() {
-  try {
-    await fs.access(REMINDERS_FILE);
-  } catch {
-    const dataDir = path.dirname(REMINDERS_FILE);
-    await fs.mkdir(dataDir, { recursive: true });
-    await fs.writeFile(REMINDERS_FILE, "[]");
+async function connectToDatabase() {
+  if (cachedDb) {
+    return cachedDb;
   }
+
+  const client = await MongoClient.connect(process.env.MONGO_URI, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+  });
+
+  const db = client.db("teleTag");
+  cachedDb = db;
+  return db;
 }
 
 async function getRemindersForToday(dateString) {
-  await ensureDataFile();
-  
   try {
-    const data = await fs.readFile(REMINDERS_FILE, "utf-8");
-    const allReminders = JSON.parse(data);
+    const db = await connectToDatabase();
+    const collection = db.collection("reminders");
     
-    return allReminders.filter(
-      (reminder) => reminder.date === dateString && reminder.sent === false
-    );
+    // Find all reminders for today that haven't been sent
+    const allReminders = await collection.find({}).toArray();
+    
+    const todayReminders = [];
+    for (const doc of allReminders) {
+      if (doc.reminders && Array.isArray(doc.reminders)) {
+        for (const reminder of doc.reminders) {
+          if (reminder.date === dateString && !reminder.sent) {
+            todayReminders.push({
+              id: reminder._id || reminder.date + reminder.text,
+              chatId: doc.chatId,
+              message: reminder.text,
+              date: reminder.date,
+              sent: reminder.sent || false,
+            });
+          }
+        }
+      }
+    }
+    
+    return todayReminders;
   } catch (error) {
     console.error("Error reading reminders:", error);
     return [];
   }
 }
 
-async function markReminderAsSent(reminderId) {
-  await ensureDataFile();
-  
+async function markReminderAsSent(chatId, reminderDate, reminderText) {
   try {
-    const data = await fs.readFile(REMINDERS_FILE, "utf-8");
-    const allReminders = JSON.parse(data);
+    const db = await connectToDatabase();
+    const collection = db.collection("reminders");
     
-    const reminder = allReminders.find((r) => r.id === reminderId);
-    if (reminder) {
-      reminder.sent = true;
-      reminder.sentAt = new Date().toISOString();
-      
-      await fs.writeFile(REMINDERS_FILE, JSON.stringify(allReminders, null, 2));
-      console.log(`Reminder ${reminderId} marked as sent`);
-      return true;
-    }
+    // Update the specific reminder in the array
+    await collection.updateOne(
+      { 
+        chatId: chatId,
+        "reminders.date": reminderDate,
+        "reminders.text": reminderText
+      },
+      {
+        $set: {
+          "reminders.$.sent": true,
+          "reminders.$.sentAt": new Date().toISOString()
+        }
+      }
+    );
     
-    console.warn(`Reminder ${reminderId} not found`);
-    return false;
+    console.log(`Reminder marked as sent for chat ${chatId}`);
+    return true;
   } catch (error) {
     console.error("Error marking reminder as sent:", error);
     return false;
@@ -79,7 +97,7 @@ export async function handler(event, context) {
 
   try {
     // Initialize bot
-    const bot = new TelegramBot(process.env.TOKEN2);
+    const bot = new TelegramBot(process.env.TOKEN);
 
     // Get today's date in YYYY-MM-DD format (UTC)
     const today = new Date().toISOString().split("T")[0];
@@ -100,12 +118,12 @@ export async function handler(event, context) {
         });
 
         // Mark as sent
-        await markReminderAsSent(reminder.id);
+        await markReminderAsSent(reminder.chatId, reminder.date, reminder.message);
         sentCount++;
-        console.log(`Sent reminder ${reminder.id} to chat ${reminder.chatId}`);
+        console.log(`Sent reminder to chat ${reminder.chatId}`);
       } catch (error) {
         failedCount++;
-        console.error(`Failed to send reminder ${reminder.id}:`, error.message);
+        console.error(`Failed to send reminder to chat ${reminder.chatId}:`, error.message);
       }
     }
 
