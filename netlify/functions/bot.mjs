@@ -1058,7 +1058,8 @@ export default async function handler(event) {
       text.startsWith("/clearreminder@tagallesisbabot")
     ) {
       const remindersData = await getReminders(chatId);
-      const indexInput = text.split(" ").slice(1).join("").trim();
+      // Extract index input by removing the command part and joining remaining parts
+      const indexInput = text.split(" ").slice(1).join(" ").replace(/\s+/g, "").trim();
 
       if (remindersData.reminders.length === 0) {
         await bot.sendMessage(chatId, "📭 **No reminders found.** There are no reminders to clear.", { parse_mode: "Markdown" });
