@@ -206,7 +206,7 @@ async function callGeminiAPI(prompt, retries = CONFIG.MAX_RETRIES) {
     const baseURL = "https://generativelanguage.googleapis.com/v1beta/models";
 
     const response = await fetch(
-      `${baseURL}/${model}:generateContent? key=${process.env.GEMINI_API_KEY}`,
+      `${baseURL}/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
         method: "POST",
         headers: {
