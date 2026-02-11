@@ -20,8 +20,8 @@ async function loginToProgres() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          username: "202239026712",
-          password: "64FGTseu",
+          username: process.env.PROGRES_USERNAME,
+          password: process.env.PROGRES_PASSWORD,
         }),
       },
     );
@@ -265,8 +265,7 @@ async function checkGradesAndNotify() {
 
     // Send notifications for changes
     if (changes.length > 0 && process.env.CLASS_GROUP_ID) {
-      const groupId = -1003025717020;
-      // process.env.CLASS_GROUP_ID;
+      const groupId = process.env.CLASS_GROUP_ID;
 
       for (const change of changes) {
         const message = `AFFICHAGE ${change.moduleName} PROGRES!`;
@@ -302,7 +301,6 @@ async function checkGradesAndNotify() {
     };
   }
 }
-
 
 dotenv.config();
 

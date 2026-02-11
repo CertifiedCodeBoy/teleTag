@@ -1,0 +1,38 @@
+# .github/workflows/check-grades-action.yml
+name: Check Grades (Backup System)
+
+on:
+  # Run every 5 minutes
+  schedule:
+    - cron: "*/5 * * * *"
+
+  # Allow manual trigger for testing
+  workflow_dispatch:
+
+jobs:
+  check-grades:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: deplo
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - name: Install dependencies
+        run: npm install node-telegram-bot-api mongodb dotenv
+
+      - name: Run grade checker script
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          MONGO_URI: ${{ secrets.MONGO_URI }}
+          PROGRES_USERNAME: ${{ secrets.PROGRES_USERNAME }}
+          PROGRES_PASSWORD: ${{ secrets.PROGRES_PASSWORD }}
+          CLASS_GROUP_ID: ${{ secrets.CLASS_GROUP_ID }}
+          PRIVATE_CHAT_ID: ${{ secrets.PRIVATE_CHAT_ID }}
+        run: node .github/scripts/check-grades.js
