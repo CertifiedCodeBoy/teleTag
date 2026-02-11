@@ -1479,7 +1479,7 @@ async function staticCommands(text, chatId, userId, msg) {
           } else {
             await bot.sendMessage(
               chatId,
-              `✅ **Grade check completed!**\n\n📋 No new grades found.\n\n*Last checked: ${new Date(result.lastChecked).toLocaleString("fr-DZ")}*`,
+              `✅ **Grade check completed!**\n\n📋 No new grades found.\n\n*Last checked: ${new Date(result.lastChecked).toLocaleString("fr-DZ", { timeZone: "Africa/Algiers" })}`,
               { parse_mode: "Markdown" },
             );
           }
