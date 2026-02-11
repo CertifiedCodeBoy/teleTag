@@ -1,6 +1,308 @@
+//bot.mjs
 import TelegramBot from "node-telegram-bot-api";
 import dotenv from "dotenv";
 import { MongoClient } from "mongodb";
+
+// affichage bot part:
+
+// ============================================
+// PROGRES API GRADE CHECKING SYSTEM
+// ============================================
+
+// Progres API helper functions
+async function loginToProgres() {
+  try {
+    const response = await fetch(
+      "https://progres.mesrs.dz/api/authentication/v1/",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          username: "202239026712",
+          password: "64FGTseu",
+        }),
+      },
+    );
+
+    if (!response.ok) {
+      throw new Error(`Login failed: ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    // Extract the last (most recent) card ID from dias
+    const cardIds = data.dias.split(",").map((id) => id.trim());
+    const cardId = cardIds[cardIds.length - 1];
+
+    return {
+      token: data.token,
+      cardId: cardId,
+      expirationDate: data.expirationDate,
+    };
+  } catch (error) {
+    console.error("Progres login error:", error);
+    throw error;
+  }
+}
+
+async function fetchExamGrades(cardId, token) {
+  try {
+    const response = await fetch(
+      `https://progres.mesrs.dz/api/infos/planningSession/dia/${cardId}/noteExamens`,
+      {
+        method: "GET",
+        headers: {
+          Authorization: token,
+        },
+      },
+    );
+
+    if (!response.ok) {
+      if (response.status === 401) {
+        throw new Error("AUTH_ERROR");
+      }
+      throw new Error(`Fetch exam grades failed: ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    // Extract only needed fields: id, mcLibelleFr, noteExamen
+    return data.map((grade) => ({
+      id: grade.id,
+      moduleName: grade.mcLibelleFr,
+      grade: grade.noteExamen,
+    }));
+  } catch (error) {
+    console.error("Fetch exam grades error:", error);
+    throw error;
+  }
+}
+
+async function fetchCCGrades(cardId, token) {
+  try {
+    const response = await fetch(
+      `https://progres.mesrs.dz/api/infos/controleContinue/dia/${cardId}/notesCC`,
+      {
+        method: "GET",
+        headers: {
+          Authorization: token,
+        },
+      },
+    );
+
+    if (!response.ok) {
+      if (response.status === 401) {
+        throw new Error("AUTH_ERROR");
+      }
+      throw new Error(`Fetch CC grades failed: ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    // Extract only needed fields: id, rattachementMcMcLibelleFr, note
+    return data.map((grade) => ({
+      id: grade.id,
+      moduleName: grade.rattachementMcMcLibelleFr,
+      grade: grade.note,
+    }));
+  } catch (error) {
+    console.error("Fetch CC grades error:", error);
+    throw error;
+  }
+}
+
+// Database functions for grades
+async function getStoredGrades() {
+  const cacheKey = getCacheKey("grades");
+  const cached = getFromCache(cacheKey);
+  if (cached) return cached;
+
+  const collection = dbManager.getCollection("grades");
+  const gradesData = await collection.findOne({});
+  const result = gradesData || {
+    cardId: null,
+    token: null,
+    tokenExpiry: null,
+    examGrades: [],
+    ccGrades: [],
+    lastChecked: null,
+  };
+
+  setCache(cacheKey, result);
+  return result;
+}
+
+async function updateStoredGrades(gradesData) {
+  const collection = dbManager.getCollection("grades");
+  await collection.updateOne(
+    {},
+    {
+      $set: {
+        ...gradesData,
+        lastUpdated: new Date(),
+      },
+    },
+    { upsert: true },
+  );
+
+  // Invalidate cache
+  const cacheKey = getCacheKey("grades");
+  cache.delete(cacheKey);
+}
+
+// Main grade checking function
+async function checkGradesAndNotify() {
+  try {
+    console.log("Starting grade check at:", new Date().toISOString());
+
+    // Get stored data
+    let storedData = await getStoredGrades();
+    let { token, cardId, tokenExpiry } = storedData;
+
+    // Check if we need to login (first time or token expired)
+    const needsLogin = !token || !cardId || new Date(tokenExpiry) <= new Date();
+
+    if (needsLogin) {
+      console.log("Logging in to Progres...");
+      const loginData = await loginToProgres();
+      token = loginData.token;
+      cardId = loginData.cardId;
+      tokenExpiry = loginData.expirationDate;
+
+      // Update stored data with new token
+      storedData.token = token;
+      storedData.cardId = cardId;
+      storedData.tokenExpiry = tokenExpiry;
+    }
+
+    // Fetch current grades
+    let examGrades, ccGrades;
+    try {
+      [examGrades, ccGrades] = await Promise.all([
+        fetchExamGrades(cardId, token),
+        fetchCCGrades(cardId, token),
+      ]);
+    } catch (error) {
+      if (error.message === "AUTH_ERROR") {
+        // Token expired, re-login and retry
+        console.log("Token expired, re-logging in...");
+        const loginData = await loginToProgres();
+        token = loginData.token;
+        cardId = loginData.cardId;
+        tokenExpiry = loginData.expirationDate;
+
+        // Retry fetching grades
+        [examGrades, ccGrades] = await Promise.all([
+          fetchExamGrades(cardId, token),
+          fetchCCGrades(cardId, token),
+        ]);
+
+        // Update token in storage
+        storedData.token = token;
+        storedData.cardId = cardId;
+        storedData.tokenExpiry = tokenExpiry;
+      } else {
+        throw error;
+      }
+    }
+
+    // Compare with stored grades and detect changes
+    const changes = [];
+
+    // Check exam grades
+    for (const newGrade of examGrades) {
+      const oldGrade = storedData.examGrades.find((g) => g.id === newGrade.id);
+
+      // Detect change: null -> number
+      if (oldGrade) {
+        if (oldGrade.grade === null && newGrade.grade !== null) {
+          changes.push({
+            type: "exam",
+            moduleName: newGrade.moduleName,
+            oldGrade: oldGrade.grade,
+            newGrade: newGrade.grade,
+          });
+        }
+      } else if (newGrade.grade !== null) {
+        // New grade entry with non-null value
+        changes.push({
+          type: "exam",
+          moduleName: newGrade.moduleName,
+          oldGrade: null,
+          newGrade: newGrade.grade,
+        });
+      }
+    }
+
+    // Check CC grades
+    for (const newGrade of ccGrades) {
+      const oldGrade = storedData.ccGrades.find((g) => g.id === newGrade.id);
+
+      // Detect change: null -> number
+      if (oldGrade) {
+        if (oldGrade.grade === null && newGrade.grade !== null) {
+          changes.push({
+            type: "cc",
+            moduleName: newGrade.moduleName,
+            oldGrade: oldGrade.grade,
+            newGrade: newGrade.grade,
+          });
+        }
+      } else if (newGrade.grade !== null) {
+        // New grade entry with non-null value
+        changes.push({
+          type: "cc",
+          moduleName: newGrade.moduleName,
+          oldGrade: null,
+          newGrade: newGrade.grade,
+        });
+      }
+    }
+
+    console.log(`Found ${changes.length} grade changes`);
+
+    // Send notifications for changes
+    if (changes.length > 0 && process.env.CLASS_GROUP_ID) {
+      const groupId = -1003025717020;
+      // process.env.CLASS_GROUP_ID;
+
+      for (const change of changes) {
+        const message = `AFFICHAGE ${change.moduleName} PROGRES!`;
+        try {
+          await bot.sendMessage(groupId, message);
+          console.log(`Sent notification for: ${change.moduleName}`);
+        } catch (error) {
+          console.error(
+            `Failed to send notification for ${change.moduleName}:`,
+            error.message,
+          );
+        }
+      }
+    }
+
+    // Update stored grades with new data
+    storedData.examGrades = examGrades;
+    storedData.ccGrades = ccGrades;
+    storedData.lastChecked = new Date().toISOString();
+    await updateStoredGrades(storedData);
+
+    return {
+      success: true,
+      changesFound: changes.length,
+      changes: changes,
+      lastChecked: storedData.lastChecked,
+    };
+  } catch (error) {
+    console.error("Error in checkGradesAndNotify:", error);
+    return {
+      success: false,
+      error: error.message,
+    };
+  }
+}
+
 
 dotenv.config();
 
@@ -161,7 +463,7 @@ async function trackAPIUsage() {
         $inc: { count: 1 },
         $setOnInsert: { date: today, created: new Date() },
       },
-      { upsert: true }
+      { upsert: true },
     );
   } catch (error) {
     console.error("Error tracking API usage:", error);
@@ -197,7 +499,7 @@ async function callGeminiAPI(prompt, retries = CONFIG.MAX_RETRIES) {
       throw new BotError(
         "GEMINI_API_KEY not found in environment variables",
         "MISSING_API_KEY",
-        500
+        500,
       );
     }
 
@@ -243,7 +545,7 @@ async function callGeminiAPI(prompt, retries = CONFIG.MAX_RETRIES) {
             },
           ],
         }),
-      }
+      },
     );
 
     if (!response.ok) {
@@ -269,7 +571,7 @@ async function callGeminiAPI(prompt, retries = CONFIG.MAX_RETRIES) {
           errorData.error?.message || "Unknown error"
         }`,
         "API_ERROR",
-        response.status
+        response.status,
       );
     }
 
@@ -279,7 +581,7 @@ async function callGeminiAPI(prompt, retries = CONFIG.MAX_RETRIES) {
       throw new BotError(
         "No response generated from Gemini API",
         "NO_RESPONSE",
-        500
+        500,
       );
     }
 
@@ -301,7 +603,7 @@ async function callGeminiAPI(prompt, retries = CONFIG.MAX_RETRIES) {
     throw new BotError(
       "Network error connecting to Gemini API",
       "NETWORK_ERROR",
-      500
+      500,
     );
   }
 }
@@ -325,7 +627,7 @@ async function updateGroupMembers(chatId, members) {
   const result = await collection.updateOne(
     { chatId },
     { $set: { members, lastUpdated: new Date() } },
-    { upsert: true }
+    { upsert: true },
   );
 
   // Invalidate cache
@@ -353,7 +655,7 @@ async function updateHelpers(chatId, helpers) {
   const result = await collection.updateOne(
     { chatId },
     { $set: { helpers, lastUpdated: new Date() } },
-    { upsert: true }
+    { upsert: true },
   );
 
   // Invalidate cache
@@ -381,7 +683,7 @@ async function updateReminders(chatId, reminders) {
   const result = await collection.updateOne(
     { chatId },
     { $set: { reminders, lastUpdated: new Date() } },
-    { upsert: true }
+    { upsert: true },
   );
 
   // Invalidate cache
@@ -408,7 +710,7 @@ async function saveAIConversation(chatId, userId, messages) {
         lastUpdated: new Date(),
       },
     },
-    { upsert: true }
+    { upsert: true },
   );
 }
 
@@ -698,7 +1000,7 @@ async function checkGeminiAPIStatus() {
         method: "GET",
         headers: { "Content-Type": "application/json" },
         signal: AbortSignal.timeout(10000),
-      }
+      },
     );
 
     if (!response.ok) {
@@ -753,6 +1055,7 @@ const commands = [
   { command: "summarize", description: "Summarize text (reply to message)" },
   { command: "clearai", description: "Clear AI conversation history" },
   { command: "credits", description: "Check API usage information" },
+  { command: "check", description: "Check for new grades from Progres" },
 ];
 
 // Initialize bot commands after ensuring database connection
@@ -789,7 +1092,7 @@ async function staticCommands(text, chatId, userId, msg) {
       await bot.sendMessage(
         chatId,
         "👋 **Hello! ** I'm your AI-powered group assistant.\n\n🔹 Use `/join` to join the group\n🔹 Use `/ask` to chat with me\n🔹 Use `/help` to see all commands\n\n*Let's get started!* 🚀",
-        { parse_mode: "Markdown" }
+        { parse_mode: "Markdown" },
       );
     }
 
@@ -806,13 +1109,13 @@ async function staticCommands(text, chatId, userId, msg) {
         await bot.sendMessage(
           chatId,
           `✅ **Welcome aboard!** You have successfully joined the group, *${user.first_name}*! 🎉`,
-          { parse_mode: "Markdown" }
+          { parse_mode: "Markdown" },
         );
       } else {
         await bot.sendMessage(
           chatId,
           `ℹ️ **Already a member! ** You're already part of our group, *${user.first_name}*!  😊`,
-          { parse_mode: "Markdown" }
+          { parse_mode: "Markdown" },
         );
       }
     }
@@ -823,7 +1126,7 @@ async function staticCommands(text, chatId, userId, msg) {
     ) {
       const groupData = await getGroupMembers(chatId);
       const userIndex = groupData.members.findIndex(
-        (member) => member.id === userId
+        (member) => member.id === userId,
       );
 
       if (userIndex !== -1) {
@@ -833,13 +1136,13 @@ async function staticCommands(text, chatId, userId, msg) {
         await bot.sendMessage(
           chatId,
           `👋 **Goodbye!** *${userName}* has left the group. We'll miss you! 😢`,
-          { parse_mode: "Markdown" }
+          { parse_mode: "Markdown" },
         );
       } else {
         await bot.sendMessage(
           chatId,
           "❌ **Not a member!** You weren't part of the group to begin with. 🤔",
-          { parse_mode: "Markdown" }
+          { parse_mode: "Markdown" },
         );
       }
     }
@@ -856,13 +1159,13 @@ async function staticCommands(text, chatId, userId, msg) {
         await bot.sendMessage(
           chatId,
           `👥 **Group Members** (${groupData.members.length})\n\n${membersList}`,
-          { parse_mode: "Markdown" }
+          { parse_mode: "Markdown" },
         );
       } else {
         await bot.sendMessage(
           chatId,
           "📭 **No members found.** The group is currently empty.",
-          { parse_mode: "Markdown" }
+          { parse_mode: "Markdown" },
         );
       }
     }
@@ -873,12 +1176,12 @@ async function staticCommands(text, chatId, userId, msg) {
     ) {
       const groupData = await getGroupMembers(chatId);
       const mentions = groupData.members.map(
-        (member) => `[${member.first_name}](tg://user?id=${member.id})`
+        (member) => `[${member.first_name}](tg://user?id=${member.id})`,
       );
 
       const message = mentions.length
         ? `🔔 **Attention everyone!**\n\n${mentions.join(
-            " "
+            " ",
           )}\n\n*You've been summoned! * ⚡`
         : "📭 **No members to mention.** The group is currently empty. ";
       await bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
@@ -897,13 +1200,13 @@ async function staticCommands(text, chatId, userId, msg) {
         await bot.sendMessage(
           chatId,
           `🆘 **New Helper!** *${helper.first_name}* has joined the helpers team! 🙋‍♂️`,
-          { parse_mode: "Markdown" }
+          { parse_mode: "Markdown" },
         );
       } else {
         await bot.sendMessage(
           chatId,
           `ℹ️ **Already helping!** You're already part of our helpers team, *${helper.first_name}*! 👨‍🔧`,
-          { parse_mode: "Markdown" }
+          { parse_mode: "Markdown" },
         );
       }
     }
@@ -920,13 +1223,13 @@ async function staticCommands(text, chatId, userId, msg) {
         await bot.sendMessage(
           chatId,
           `🆘 **Available Helpers** (${helpersData.helpers.length})\n\n${helpersList}\n\n*These members are ready to help!*`,
-          { parse_mode: "Markdown" }
+          { parse_mode: "Markdown" },
         );
       } else {
         await bot.sendMessage(
           chatId,
           "📭 **No helpers found.** No one is currently available to help.",
-          { parse_mode: "Markdown" }
+          { parse_mode: "Markdown" },
         );
       }
     }
@@ -937,7 +1240,7 @@ async function staticCommands(text, chatId, userId, msg) {
     ) {
       const helpersData = await getHelpers(chatId);
       const userIndex = helpersData.helpers.findIndex(
-        (helper) => helper.id === userId
+        (helper) => helper.id === userId,
       );
 
       if (userIndex !== -1) {
@@ -947,13 +1250,13 @@ async function staticCommands(text, chatId, userId, msg) {
         await bot.sendMessage(
           chatId,
           `👋 **Helper departure!** *${helperName}* has left the helpers team.  Thanks for your service! 🙏`,
-          { parse_mode: "Markdown" }
+          { parse_mode: "Markdown" },
         );
       } else {
         await bot.sendMessage(
           chatId,
           "❌ **Not a helper!** You weren't part of the helpers team.  🤷‍♂️",
-          { parse_mode: "Markdown" }
+          { parse_mode: "Markdown" },
         );
       }
     }
@@ -964,11 +1267,11 @@ async function staticCommands(text, chatId, userId, msg) {
     ) {
       const helpersData = await getHelpers(chatId);
       const mentions = helpersData.helpers.map(
-        (helper) => `[${helper.first_name}](tg://user?id=${helper.id})`
+        (helper) => `[${helper.first_name}](tg://user?id=${helper.id})`,
       );
       const message = mentions.length
         ? `🆘 **Help requested!**\n\n${mentions.join(
-            " "
+            " ",
           )}\n\n*Someone needs assistance!* 🚨`
         : "📭 **No helpers available right now.** Try again later or ask in the group!  🤝";
       await bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
@@ -984,25 +1287,25 @@ async function staticCommands(text, chatId, userId, msg) {
           .map(
             (reminder, index) =>
               `${index + 1}.  **${reminder.text}**\n   📅 *${new Date(
-                reminder.date
+                reminder.date,
               ).toLocaleDateString("en-US", {
                 weekday: "long",
                 day: "numeric",
                 month: "long",
                 year: "numeric",
-              })}*`
+              })}*`,
           )
           .join("\n\n");
         await bot.sendMessage(
           chatId,
           `⏰ **Active Reminders** (${remindersData.reminders.length})\n\n${remindersList}`,
-          { parse_mode: "Markdown" }
+          { parse_mode: "Markdown" },
         );
       } else {
         await bot.sendMessage(
           chatId,
           "📭 **No reminders found.** You haven't set any reminders yet.",
-          { parse_mode: "Markdown" }
+          { parse_mode: "Markdown" },
         );
       }
     }
@@ -1015,7 +1318,7 @@ async function staticCommands(text, chatId, userId, msg) {
       await bot.sendMessage(
         chatId,
         "🗑️ **Reminders cleared!** All reminders have been deleted. ✨",
-        { parse_mode: "Markdown" }
+        { parse_mode: "Markdown" },
       );
     }
 
@@ -1029,7 +1332,7 @@ async function staticCommands(text, chatId, userId, msg) {
       await bot.sendMessage(
         chatId,
         "🤖 **AI memory cleared!** Our conversation history has been reset. Starting fresh! 🔄",
-        { parse_mode: "Markdown" }
+        { parse_mode: "Markdown" },
       );
     }
 
@@ -1043,13 +1346,13 @@ async function staticCommands(text, chatId, userId, msg) {
 
         // Parse target language from command: /translate to {language}
         const translateMatch = sanitizedText.match(
-          /^\/translate(?:@tagallesisbabot)?\s+to\s+(.+)$/i
+          /^\/translate(?:@tagallesisbabot)?\s+to\s+(.+)$/i,
         );
         const targetLanguage = translateMatch ? translateMatch[1].trim() : null;
 
         const translation = await translateText(
           msg.reply_to_message.text,
-          targetLanguage
+          targetLanguage,
         );
 
         const langInfo = targetLanguage
@@ -1063,7 +1366,7 @@ async function staticCommands(text, chatId, userId, msg) {
         await bot.sendMessage(
           chatId,
           "❓ **How to translate:**\n\nReply to a message with:\n• `/translate` — auto English ↔ Arabic\n• `/translate to french` — translate to French\n• `/translate to spanish` — translate to Spanish\n• `/translate to {any language}` 🔄",
-          { parse_mode: "Markdown" }
+          { parse_mode: "Markdown" },
         );
       }
     }
@@ -1082,7 +1385,7 @@ async function staticCommands(text, chatId, userId, msg) {
         await bot.sendMessage(
           chatId,
           "❓ **How to summarize:** Reply to a message with `/summarize` to get a summary!  📋",
-          { parse_mode: "Markdown" }
+          { parse_mode: "Markdown" },
         );
       }
     }
@@ -1099,7 +1402,7 @@ async function staticCommands(text, chatId, userId, msg) {
       await bot.sendMessage(
         chatId,
         "🔄 **Complete Reset!**\n\n✅ All members cleared\n✅ All helpers cleared\n✅ All reminders cleared\n✅ AI conversations cleared\n\n*Starting fresh!* 🚀",
-        { parse_mode: "Markdown" }
+        { parse_mode: "Markdown" },
       );
     }
 
@@ -1147,7 +1450,54 @@ async function staticCommands(text, chatId, userId, msg) {
         await bot.sendMessage(
           chatId,
           "❌ **Error!** Unable to fetch API information right now. Please try again later. 🔄",
-          { parse_mode: "Markdown" }
+          { parse_mode: "Markdown" },
+        );
+      }
+    }
+
+    // check affichage:
+    if (
+      sanitizedText === "/check" ||
+      sanitizedText === "/check@tagallesisbabot"
+    ) {
+      try {
+        await bot.sendMessage(
+          chatId,
+          "🔍 **Checking for new grades...**\n\nPlease wait, this may take a moment. ⏳",
+          { parse_mode: "Markdown" },
+        );
+
+        await bot.sendChatAction(chatId, "typing");
+
+        const result = await checkGradesAndNotify();
+
+        if (result.success) {
+          if (result.changesFound > 0) {
+            await bot.sendMessage(
+              chatId,
+              `✅ **Grade check completed!**\n\n🎓 Found **${result.changesFound}** new grade(s)!\n\nNotifications sent to the class group. 📢`,
+              { parse_mode: "Markdown" },
+            );
+          } else {
+            await bot.sendMessage(
+              chatId,
+              `✅ **Grade check completed!**\n\n📋 No new grades found.\n\n*Last checked: ${new Date(result.lastChecked).toLocaleString("fr-DZ")}*`,
+              { parse_mode: "Markdown" },
+            );
+          }
+        } else {
+          await bot.sendMessage(
+            chatId,
+            `❌ **Error checking grades:**\n\n\`${result.error}\`\n\nPlease try again later. 🔄`,
+            { parse_mode: "Markdown" },
+          );
+        }
+      } catch (error) {
+        console.error("Check command error:", error);
+        await bot.sendMessage(
+          chatId,
+          "❌ **Error!** Failed to check grades. Please try again later. 🔧",
+          { parse_mode: "Markdown" },
         );
       }
     }
@@ -1156,7 +1506,7 @@ async function staticCommands(text, chatId, userId, msg) {
     await bot.sendMessage(
       chatId,
       "❌ **Oops!** An error occurred while processing your command. Please try again! 🔧",
-      { parse_mode: "Markdown" }
+      { parse_mode: "Markdown" },
     );
   }
 }
@@ -1173,7 +1523,7 @@ export default async function handler(event) {
     if (!msg || !msg.text) {
       return new Response(
         JSON.stringify({ message: "No message or text to process" }),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+        { status: 200, headers: { "Content-Type": "application/json" } },
       );
     }
 
@@ -1193,11 +1543,11 @@ export default async function handler(event) {
           await bot.sendMessage(
             chatId,
             "❌ **Question too long!** Please keep it under 30,000 characters. 📏",
-            { parse_mode: "Markdown" }
+            { parse_mode: "Markdown" },
           );
           return new Response(
             JSON.stringify({ message: "Question too long" }),
-            { status: 200 }
+            { status: 200 },
           );
         }
 
@@ -1205,7 +1555,7 @@ export default async function handler(event) {
           await bot.sendMessage(
             chatId,
             "⚠️ **Rate limit exceeded!** Please wait a moment before asking another question. ⏳",
-            { parse_mode: "Markdown" }
+            { parse_mode: "Markdown" },
           );
           return new Response(JSON.stringify({ message: "Rate limited" }), {
             status: 200,
@@ -1221,7 +1571,7 @@ export default async function handler(event) {
         await bot.sendMessage(
           chatId,
           "❓ **How to ask:** Use `/ask` followed by your question!\n\n*Example:* `/ask What is the weather like?` 🌤️",
-          { parse_mode: "Markdown" }
+          { parse_mode: "Markdown" },
         );
       }
     }
@@ -1234,13 +1584,13 @@ export default async function handler(event) {
             .map(
               (reminder, index) =>
                 `${index + 1}. ${reminder.text} - ${new Date(
-                  reminder.date
+                  reminder.date,
                 ).toLocaleDateString("fr-dz", {
                   weekday: "long",
                   day: "numeric",
                   month: "long",
                   year: "numeric",
-                })}`
+                })}`,
             )
             .join("\n")
         : "No reminders found.";
@@ -1249,7 +1599,7 @@ export default async function handler(event) {
 
       const currentDate = new Date();
       const updatedReminders = remindersData.reminders.filter(
-        (reminder) => new Date(reminder.date) > currentDate
+        (reminder) => new Date(reminder.date) > currentDate,
       );
 
       await updateReminders(chatId, updatedReminders);
@@ -1267,13 +1617,13 @@ export default async function handler(event) {
         await bot.sendMessage(
           chatId,
           "❓ **How to use:** `/clearreminder 1` or `/clearreminder 1,2,3,5`\n\nProvide one or more indexes separated by commas. 📋",
-          { parse_mode: "Markdown" }
+          { parse_mode: "Markdown" },
         );
       } else if (remindersData.reminders.length === 0) {
         await bot.sendMessage(
           chatId,
           "📭 **No reminders found.** There are no reminders to clear.",
-          { parse_mode: "Markdown" }
+          { parse_mode: "Markdown" },
         );
       } else {
         // Parse comma-separated indexes
@@ -1298,11 +1648,11 @@ export default async function handler(event) {
           await bot.sendMessage(
             chatId,
             `❌ **Invalid index(es):** \`${invalidIndexes.join(
-              ", "
+              ", ",
             )}\`\n\nPlease provide valid indexes between 1 and ${
               remindersData.reminders.length
             }. 📋`,
-            { parse_mode: "Markdown" }
+            { parse_mode: "Markdown" },
           );
         } else {
           // Sort indexes in descending order to remove from highest to lowest (prevents index shifting issues)
@@ -1320,7 +1670,7 @@ export default async function handler(event) {
 
           if (invalidIndexes.length > 0) {
             responseMsg += `\n\n⚠️ **Skipped invalid index(es):** \`${invalidIndexes.join(
-              ", "
+              ", ",
             )}\``;
           }
 
@@ -1344,27 +1694,27 @@ export default async function handler(event) {
         if (
           remindersData.reminders.some(
             (reminder) =>
-              reminder.date === date && reminder.text === messageText
+              reminder.date === date && reminder.text === messageText,
           )
         ) {
           await bot.sendMessage(
             chatId,
-            "Reminder already set for the message at the same date"
+            "Reminder already set for the message at the same date",
           );
         } else if (!messageText) {
           await bot.sendMessage(
             chatId,
-            "Please reply to a message to set a reminder"
+            "Please reply to a message to set a reminder",
           );
         } else if (!date) {
           await bot.sendMessage(
             chatId,
-            "Please provide a date for the reminder with the format /setreminder <yyyy-mm-dd>"
+            "Please provide a date for the reminder with the format /setreminder <yyyy-mm-dd>",
           );
         } else if (!isValidDate(date)) {
           await bot.sendMessage(
             chatId,
-            "Invalid date, please provide a valid date in the format yyyy-mm-dd"
+            "Invalid date, please provide a valid date in the format yyyy-mm-dd",
           );
         } else {
           remindersData.reminders.push({ date, text: messageText });
@@ -1378,7 +1728,7 @@ export default async function handler(event) {
 
     return new Response(
       JSON.stringify({ message: "Message processed successfully" }),
-      { status: 200, headers: { "Content-Type": "application/json" } }
+      { status: 200, headers: { "Content-Type": "application/json" } },
     );
   } catch (error) {
     console.error("Handler Error:", error);
@@ -1396,7 +1746,7 @@ export default async function handler(event) {
       {
         status: error instanceof BotError ? error.statusCode : 500,
         headers: { "Content-Type": "application/json" },
-      }
+      },
     );
   }
 }

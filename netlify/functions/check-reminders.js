@@ -1,3 +1,4 @@
+// check-reminders.js
 // Netlify serverless function to check and send due reminders
 // Triggered by external cron service (cron-job.org)
 
