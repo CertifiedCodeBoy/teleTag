@@ -268,7 +268,8 @@ async function checkGradesAndNotify() {
       const groupId = process.env.CLASS_GROUP_ID;
 
       for (const change of changes) {
-        const message = `AFFICHAGE ${change.moduleName} PROGRES!`;
+        const prefix = change.type === "cc" ? "NOTE TD/TP" : "EXAMEN";
+        const message = `AFFICHAGE ${prefix} ${change.moduleName} PROGRES!`;
         try {
           await bot.sendMessage(groupId, message);
           console.log(`Sent notification for: ${change.moduleName}`);
@@ -712,7 +713,7 @@ async function saveAIConversation(chatId, userId, messages) {
   );
 }
 
-async function generateAIResponse(prompt, chatId, userId) {
+async function generateAIResponse(prompt, chatId, userId, replyContext = null) {
   try {
     if (!checkRateLimit(userId)) {
       return "⚠️ Rate limit exceeded. Please wait a moment before sending another request.";
@@ -725,29 +726,9 @@ async function generateAIResponse(prompt, chatId, userId) {
     }
 
     const history = await getAIConversation(chatId, userId);
-    let fullPrompt = `You are a helpful AI assistant in a Telegram group chat. You should format your responses using Telegram's formatting features:
+    let fullPrompt = `You are a helpful assistant in a Telegram university group chat (Algerian students). Be concise and direct — just answer the question. Do NOT add labels like "Answer:", "AI:", section headers, or meta-commentary. Use markdown only when it genuinely helps (bold for key terms, code blocks for code, bullet lists for steps). Keep it natural and friendly. You're knowledgeable in academics but can chat casually and have fun too.
 
-**Text Formatting Guidelines:**
-- Use **bold text** for emphasis (double asterisks)
-- Use *italic text* for subtle emphasis (single asterisks) 
-- Use \`monospace\` for code, commands, or technical terms (backticks)
-- Use __underlined text__ for important information (double underscores)
-- Use ~~strikethrough~~ when correcting information (double tildes)
-
-**Message Structure:**
-- Use emojis appropriately to make responses engaging 📝
-- Break long responses into clear sections
-- Use bullet points or numbered lists when listing items
-- Keep responses concise but helpful
-- Use line breaks for better readability
-
-**Telegram Features Awareness:**
-- Remember this is a Telegram chat environment
-- Users can reply to messages, forward them, and use @ mentions
-- Support both group and private chat contexts
-- Be aware of Telegram's bot capabilities
-
-Keep responses conversational and well-formatted.  `;
+`;
 
     if (history.length > 0) {
       fullPrompt += "Previous conversation:\n";
@@ -775,13 +756,20 @@ Keep responses conversational and well-formatted.  `;
       fullPrompt += "\n";
     }
 
-    fullPrompt += `User: ${sanitizedPrompt}`;
+    if (replyContext) {
+      fullPrompt += `[Context — the user is replying to this message: "${sanitizeInput(replyContext).substring(0, 500)}"]
+`;
+    }
+    fullPrompt += sanitizedPrompt;
 
     // Final check for prompt length with more generous limits
     if (fullPrompt.length > CONFIG.MAX_CONTEXT_LENGTH) {
       // Smart truncation: keep the most recent context
-      const basePrompt = `You are a helpful AI assistant in a Telegram group chat. Format responses with **bold**, *italic*, \`code\`, and emojis 🤖. Keep responses well-structured and engaging.`;
-      const userPrompt = `User: ${sanitizedPrompt}`;
+      const basePrompt = `You are a helpful assistant in a Telegram university group chat. Be concise and direct — just answer, no labels or headers. Markdown only when it helps.`;
+      const userPrompt = replyContext
+        ? `[Replying to: "${sanitizeInput(replyContext).substring(0, 200)}"]
+${sanitizedPrompt}`
+        : sanitizedPrompt;
       const availableForHistory =
         CONFIG.MAX_CONTEXT_LENGTH - basePrompt.length - userPrompt.length - 100;
 
@@ -1054,6 +1042,7 @@ const commands = [
   { command: "clearai", description: "Clear AI conversation history" },
   { command: "credits", description: "Check API usage information" },
   { command: "check", description: "Check for new grades from Progres" },
+  { command: "games", description: "Play group games together 🎮" },
 ];
 
 // Initialize bot commands after ensuring database connection
@@ -1453,6 +1442,36 @@ async function staticCommands(text, chatId, userId, msg) {
       }
     }
 
+    // Games command
+    if (
+      sanitizedText === "/games" ||
+      sanitizedText === "/games@tagallesisbabot"
+    ) {
+      await bot.sendMessage(
+        chatId,
+        "🎮 *Choose a game for the group!*\n\nTap a button and the bot will generate a prompt for everyone to play:",
+        {
+          parse_mode: "Markdown",
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: "🎭 Truth", callback_data: "game_truth" },
+                { text: "😈 Dare", callback_data: "game_dare" },
+              ],
+              [
+                { text: "🤔 Would You Rather", callback_data: "game_wyr" },
+                { text: "🧠 Trivia", callback_data: "game_trivia" },
+              ],
+              [
+                { text: "🔥 Hot Take", callback_data: "game_hottake" },
+                { text: "🧩 Riddle", callback_data: "game_riddle" },
+              ],
+            ],
+          },
+        },
+      );
+    }
+
     // check affichage:
     if (
       sanitizedText === "/check" ||
@@ -1479,7 +1498,7 @@ async function staticCommands(text, chatId, userId, msg) {
           } else {
             await bot.sendMessage(
               chatId,
-              `✅ **Grade check completed!**\n\n📋 No new grades found.\n\n*Last checked: ${new Date(result.lastChecked).toLocaleString("fr-DZ", { timeZone: "Africa/Algiers" })}`,
+              `✅ **Grade check completed!**\n\n📋 No new grades found.\n\n*Last checked: ${new Date(new Date(result.lastChecked).getTime() + 3600000).toISOString().slice(0, 16).replace("T", " ")}*`,
               { parse_mode: "Markdown" },
             );
           }
@@ -1509,6 +1528,77 @@ async function staticCommands(text, chatId, userId, msg) {
   }
 }
 
+// ============================================
+// GAMES SYSTEM
+// ============================================
+
+const GAMES = {
+  truth: {
+    label: "🎭 Truth",
+    prompt:
+      "Generate one truth question for a university student group chat — fun, slightly personal but appropriate. Just the question, nothing else.",
+  },
+  dare: {
+    label: "😈 Dare",
+    prompt:
+      "Generate one dare challenge for a university student group — silly or bold but appropriate. Just the dare text, nothing else.",
+  },
+  wyr: {
+    label: "🤔 Would You Rather",
+    prompt:
+      "Generate one 'Would You Rather' question for a university group chat. Format only as: 'Would you rather [A] or [B]?' — nothing else.",
+  },
+  trivia: {
+    label: "🧠 Trivia",
+    prompt:
+      "Generate one fun trivia question with 4 options labeled A, B, C, D. At the end add the answer as: ||Answer: X||. Nothing else.",
+  },
+  hottake: {
+    label: "🔥 Hot Take",
+    prompt:
+      "Generate one spicy hot take or controversial opinion about university life or pop culture for group debate. Just the statement, nothing else.",
+  },
+  riddle: {
+    label: "🧩 Riddle",
+    prompt:
+      "Give one fun riddle. Then on a new line put the answer as a spoiler: ||Answer: ...||. Nothing else.",
+  },
+};
+
+async function handleGameCallback(callbackQuery) {
+  const chatId = callbackQuery.message.chat.id;
+  const callbackId = callbackQuery.id;
+  const data = callbackQuery.data;
+  const callerName = callbackQuery.from.first_name || "Someone";
+
+  try {
+    await bot.answerCallbackQuery(callbackId);
+  } catch (e) {
+    // ignore answer timeout errors
+  }
+
+  if (!data.startsWith("game_")) return;
+  const gameKey = data.replace("game_", "");
+  const game = GAMES[gameKey];
+  if (!game) return;
+
+  try {
+    await bot.sendChatAction(chatId, "typing");
+    const content = await callGeminiAPI(game.prompt);
+    await bot.sendMessage(
+      chatId,
+      `${game.label} — picked by *${callerName}*\n\n${content}`,
+      { parse_mode: "Markdown" },
+    );
+  } catch (error) {
+    console.error("Game callback error:", error);
+    await bot.sendMessage(
+      chatId,
+      "❌ Failed to generate game content. Try again!",
+    );
+  }
+}
+
 // Enhanced main handler with better error handling
 export default async function handler(event) {
   try {
@@ -1516,6 +1606,16 @@ export default async function handler(event) {
 
     const bodyString = await readStream(event.body);
     const body = JSON.parse(bodyString);
+
+    // Handle inline keyboard callbacks (e.g. game buttons)
+    const callbackQuery = body.callback_query;
+    if (callbackQuery) {
+      await handleGameCallback(callbackQuery);
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
 
     const msg = body.message;
     if (!msg || !msg.text) {
@@ -1561,7 +1661,13 @@ export default async function handler(event) {
         }
 
         await bot.sendChatAction(chatId, "typing");
-        const aiResponse = await generateAIResponse(question, chatId, userId);
+        const replyContext = msg.reply_to_message?.text || null;
+        const aiResponse = await generateAIResponse(
+          question,
+          chatId,
+          userId,
+          replyContext,
+        );
         await bot.sendMessage(chatId, `🤖 ${aiResponse}`, {
           parse_mode: "Markdown",
         });
