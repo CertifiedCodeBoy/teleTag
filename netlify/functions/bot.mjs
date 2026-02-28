@@ -607,6 +607,166 @@ async function callGeminiAPI(prompt, retries = CONFIG.MAX_RETRIES) {
   }
 }
 
+// ============================================
+// FILE HANDLING & MULTIMODAL GEMINI
+// ============================================
+
+async function downloadTelegramFile(fileId) {
+  const infoRes = await fetch(
+    `https://api.telegram.org/bot${process.env.TOKEN}/getFile?file_id=${fileId}`,
+  );
+  if (!infoRes.ok) throw new Error("Failed to get file info from Telegram");
+  const infoData = await infoRes.json();
+  if (!infoData.ok) throw new Error("Telegram getFile error");
+
+  const fileUrl = `https://api.telegram.org/file/bot${process.env.TOKEN}/${infoData.result.file_path}`;
+  const fileRes = await fetch(fileUrl);
+  if (!fileRes.ok) throw new Error("Failed to download file from Telegram");
+
+  const arrayBuffer = await fileRes.arrayBuffer();
+  return Buffer.from(arrayBuffer).toString("base64");
+}
+
+// Extract file info from a Telegram message (document or photo)
+function extractFileFromMessage(msg) {
+  if (!msg) return null;
+  if (msg.document) {
+    return {
+      fileId: msg.document.file_id,
+      mimeType: msg.document.mime_type || "application/octet-stream",
+      fileName: msg.document.file_name || "file",
+    };
+  }
+  if (msg.photo && msg.photo.length > 0) {
+    // Use the highest resolution photo
+    return {
+      fileId: msg.photo[msg.photo.length - 1].file_id,
+      mimeType: "image/jpeg",
+      fileName: "photo.jpg",
+    };
+  }
+  return null;
+}
+
+async function callGeminiAPIMultimodal(
+  promptText,
+  fileBase64,
+  mimeType,
+  retries = CONFIG.MAX_RETRIES,
+) {
+  await trackAPIUsage();
+
+  if (!process.env.GEMINI_API_KEY) {
+    throw new BotError("GEMINI_API_KEY not configured", "MISSING_API_KEY", 500);
+  }
+
+  // Supported multimodal MIME types for Gemini
+  const supportedMimes = [
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+    "application/pdf",
+    "text/plain",
+  ];
+  const effectiveMime = supportedMimes.includes(mimeType)
+    ? mimeType
+    : "application/octet-stream";
+
+  const model = "gemini-2.5-flash";
+  const baseURL = "https://generativelanguage.googleapis.com/v1beta/models";
+
+  try {
+    const response = await fetch(
+      `${baseURL}/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [
+                { text: promptText },
+                {
+                  inline_data: {
+                    mime_type: effectiveMime,
+                    data: fileBase64,
+                  },
+                },
+              ],
+            },
+          ],
+          generationConfig: {
+            temperature: 0.4,
+            topP: 0.9,
+            maxOutputTokens: 4096,
+          },
+          safetySettings: [
+            {
+              category: "HARM_CATEGORY_HARASSMENT",
+              threshold: "BLOCK_MEDIUM_AND_ABOVE",
+            },
+            {
+              category: "HARM_CATEGORY_HATE_SPEECH",
+              threshold: "BLOCK_MEDIUM_AND_ABOVE",
+            },
+            {
+              category: "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+              threshold: "BLOCK_MEDIUM_AND_ABOVE",
+            },
+            {
+              category: "HARM_CATEGORY_DANGEROUS_CONTENT",
+              threshold: "BLOCK_MEDIUM_AND_ABOVE",
+            },
+          ],
+        }),
+      },
+    );
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      if (
+        response.status === 429 ||
+        errorData.error?.message?.includes("quota")
+      ) {
+        throw new BotError("QUOTA_EXCEEDED", "QUOTA_EXCEEDED", 429);
+      }
+      if (response.status >= 500 && retries > 0) {
+        await new Promise((r) => setTimeout(r, CONFIG.RETRY_DELAY));
+        return callGeminiAPIMultimodal(
+          promptText,
+          fileBase64,
+          mimeType,
+          retries - 1,
+        );
+      }
+      throw new BotError(
+        `Gemini multimodal error: ${response.status}`,
+        "API_ERROR",
+        response.status,
+      );
+    }
+
+    const data = await response.json();
+    if (!data.candidates || data.candidates.length === 0) {
+      throw new BotError("No response from Gemini", "NO_RESPONSE", 500);
+    }
+    return data.candidates[0].content.parts[0].text;
+  } catch (error) {
+    if (error instanceof BotError) throw error;
+    if (error.name === "TypeError" && retries > 0) {
+      await new Promise((r) => setTimeout(r, CONFIG.RETRY_DELAY));
+      return callGeminiAPIMultimodal(
+        promptText,
+        fileBase64,
+        mimeType,
+        retries - 1,
+      );
+    }
+    throw new BotError("Network error", "NETWORK_ERROR", 500);
+  }
+}
+
 // Enhanced database functions with caching
 async function getGroupMembers(chatId) {
   const cacheKey = getCacheKey("members", chatId);
@@ -931,6 +1091,131 @@ ${sanitized}`;
   return await callGeminiAPI(prompt);
 }
 
+async function generateQCM(topic) {
+  const sanitized = sanitizeInput(topic);
+  const prompt = `You are an assistant generating a QCM (Questionnaire à Choix Multiple) for Algerian university students.
+
+Generate exactly 5 multiple choice questions about: ${sanitized}
+
+Format each question EXACTLY like this:
+**Q1.** [question text]
+A) [option]
+B) [option]
+C) [option]
+D) [option]
+
+After all 5 questions, add a line break then write:
+**Réponses:** ||Q1:X, Q2:X, Q3:X, Q4:X, Q5:X|| (replace X with correct letter)
+
+Only output the questions and the answers line. Nothing else.`;
+  return await callGeminiAPI(prompt);
+}
+
+async function solveWithAI(guide, fileBase64, mimeType) {
+  const sanitizedGuide = guide ? sanitizeInput(guide) : "";
+
+  const languageHint = (() => {
+    const g = sanitizedGuide.toLowerCase();
+    if (g.includes("java") && !g.includes("javascript")) return "Java";
+    if (g.includes("javascript") || g.includes(" js ") || g.includes("js:"))
+      return "JavaScript";
+    if (g.includes("python")) return "Python";
+    if (g.includes("arduino")) return "Arduino (C++)";
+    if (g.includes("c++")) return "C++";
+    if (g.includes(" c ") || g.includes("langage c")) return "C";
+    if (g.includes("sql")) return "SQL";
+    if (g.includes("html") || g.includes("css")) return "HTML/CSS";
+    return null;
+  })();
+
+  let prompt;
+  if (fileBase64) {
+    prompt = `You are an expert academic assistant helping Algerian university students solve exercises.
+
+Analyze the file and solve every question/exercise you find in it.
+
+**Output rules (follow strictly):**
+- If the content is mathematical, physical, or theoretical → write the full solution in LaTeX (use \\( \\) for inline math, \\[ \\] for display math).
+- If the content is a programming exercise → write clean, complete, commented code.${languageHint ? `\n- The student specifically wants the solution in **${languageHint}**.` : "\n- Auto-detect the required language from the exercise (Java, Python, JavaScript, Arduino, C, C++, SQL, etc.)"}
+- If the file contains multiple exercises, solve each one clearly separated.
+- Do NOT add meta-commentary, preambles, or «here is the solution» text. Go straight to the work.${sanitizedGuide ? `\n\nAdditional instructions from student: ${sanitizedGuide}` : ""}`;
+  } else {
+    // Text-only solve
+    prompt = `You are an expert academic assistant helping Algerian university students.
+
+Solve the following problem completely:
+
+${sanitizedGuide}
+
+**Output rules:**
+- Mathematical/theoretical content → LaTeX (use \\( \\) for inline, \\[ \\] for display math).
+- Programming problems → clean, complete, commented code.${languageHint ? ` Use **${languageHint}**.` : " Auto-detect the language."}
+- Go straight to the solution without meta-commentary.`;
+  }
+
+  if (fileBase64) {
+    return await callGeminiAPIMultimodal(prompt, fileBase64, mimeType);
+  } else {
+    return await callGeminiAPI(prompt);
+  }
+}
+
+async function generateEmail(description) {
+  const sanitized = sanitizeInput(description);
+
+  // Determine greeting based on Algeria local time (UTC+1)
+  const algeriaHour = new Date(Date.now() + 3600000).getUTCHours();
+  const greeting = algeriaHour >= 18 ? "Bonsoir" : "Bonjour";
+
+  // Detect gender hint from description keywords
+  const lower = sanitized.toLowerCase();
+  const masculineHints = [
+    "monsieur",
+    "professeur",
+    "directeur",
+    "doyen",
+    "chef",
+    " m.",
+    " mr",
+    " sir",
+    " him",
+    " his",
+    "male",
+    "homme",
+  ];
+  const feminineHints = [
+    "madame",
+    "professeure",
+    "directrice",
+    "doyenne",
+    " mme",
+    " ms",
+    " mrs",
+    " her",
+    "female",
+    "femme",
+  ];
+  const isMasc = masculineHints.some((w) => lower.includes(w));
+  const isFem = feminineHints.some((w) => lower.includes(w));
+  const civility = isMasc ? "Monsieur" : isFem ? "Madame" : "Monsieur/Madame";
+
+  const prompt = `You are an assistant that writes formal French academic emails for Algerian university students.
+
+The user will describe what they need in English or Arabic. Generate a formal French email following this EXACT template — output ONLY the email, nothing else:
+
+Subject: "[subject in French]"
+
+${greeting} ${civility},
+
+[email body — formal, concise French, 2-4 sentences max, no filler]
+
+Cordialement,
+
+User's request: ${sanitized}`;
+
+  return await callGeminiAPI(prompt);
+}
+
 async function summarizeText(text) {
   const sanitized = sanitizeInput(text);
 
@@ -1043,6 +1328,18 @@ const commands = [
   { command: "credits", description: "Check API usage information" },
   { command: "check", description: "Check for new grades from Progres" },
   { command: "games", description: "Play group games together 🎮" },
+  {
+    command: "email",
+    description: "Generate a formal French email from your description",
+  },
+  {
+    command: "solve",
+    description: "Solve an exercise — reply to a file or write the problem",
+  },
+  {
+    command: "qcm",
+    description: "Generate a QCM quiz on a topic",
+  },
 ];
 
 // Initialize bot commands after ensuring database connection
@@ -1486,6 +1783,155 @@ async function staticCommands(text, chatId, userId, msg) {
       );
     }
 
+    // /solve command
+    if (
+      sanitizedText.startsWith("/solve") ||
+      sanitizedText.startsWith("/solve@tagallesisbabot")
+    ) {
+      const guide = sanitizedText
+        .replace(/^\/solve(@tagallesisbabot)?\s*/, "")
+        .trim();
+      const replyMsg = msg.reply_to_message;
+      const fileInfo = extractFileFromMessage(replyMsg);
+
+      if (!fileInfo && !guide) {
+        await bot.sendMessage(
+          chatId,
+          "📎 *How to use /solve:*\n\n• Reply to an image or PDF with `/solve` to solve it\n• Add a guide: `/solve solve in Python`\n• Or just write the problem: `/solve integrate x² from 0 to 1`",
+          { parse_mode: "Markdown" },
+        );
+      } else {
+        try {
+          await bot.sendMessage(
+            chatId,
+            fileInfo
+              ? "🔍 Downloading and analysing the file..."
+              : "🧠 Solving...",
+          );
+          await bot.sendChatAction(chatId, "typing");
+
+          let fileBase64 = null;
+          let mimeType = null;
+
+          if (fileInfo) {
+            fileBase64 = await downloadTelegramFile(fileInfo.fileId);
+            mimeType = fileInfo.mimeType;
+          }
+
+          const solution = await solveWithAI(
+            guide || null,
+            fileBase64,
+            mimeType,
+          );
+
+          // Split long responses
+          const MAX = 4000;
+          if (solution.length <= MAX) {
+            await bot.sendMessage(chatId, solution, { parse_mode: "Markdown" });
+          } else {
+            const parts = [];
+            for (let i = 0; i < solution.length; i += MAX) {
+              parts.push(solution.slice(i, i + MAX));
+            }
+            for (const part of parts) {
+              await bot.sendMessage(chatId, part, { parse_mode: "Markdown" });
+            }
+          }
+        } catch (error) {
+          console.error("Solve command error:", error);
+          const msg_err =
+            error instanceof BotError && error.code === "QUOTA_EXCEEDED"
+              ? "⚠️ API quota exceeded. Try again later."
+              : "❌ Failed to solve. Make sure the file is an image or PDF and try again.";
+          await bot.sendMessage(chatId, msg_err);
+        }
+      }
+    }
+
+    // /qcm command
+    if (
+      sanitizedText.startsWith("/qcm ") ||
+      sanitizedText.startsWith("/qcm@tagallesisbabot ") ||
+      sanitizedText === "/qcm" ||
+      sanitizedText === "/qcm@tagallesisbabot"
+    ) {
+      const topic = sanitizedText
+        .replace(/^\/qcm(@tagallesisbabot)?\s*/, "")
+        .trim();
+
+      if (!topic) {
+        await bot.sendMessage(
+          chatId,
+          "📝 *How to use /qcm:*\n\nProvide a topic and the bot generates a 5-question QCM with hidden answers.\n\n*Examples:*\n• `/qcm algorithmique`\n• `/qcm bases de données relationnelles`\n• `/qcm photosynthèse`",
+          { parse_mode: "Markdown" },
+        );
+      } else {
+        try {
+          await bot.sendChatAction(chatId, "typing");
+          const qcm = await generateQCM(topic);
+          // format spoilers from || || into HTML
+          const formatted = formatGameMessage(qcm);
+          await bot.sendMessage(
+            chatId,
+            `📝 <b>QCM — ${topic}</b>\n\n${formatted}`,
+            { parse_mode: "HTML" },
+          );
+        } catch (error) {
+          console.error("QCM command error:", error);
+          await bot.sendMessage(
+            chatId,
+            "❌ Failed to generate QCM. Please try again.",
+          );
+        }
+      }
+    }
+
+    // Email command
+    if (
+      sanitizedText.startsWith("/email ") ||
+      sanitizedText.startsWith("/email@tagallesisbabot ")
+    ) {
+      const description = sanitizedText.replace(
+        /^\/email(@tagallesisbabot)?\s+/,
+        "",
+      );
+      if (description.trim()) {
+        try {
+          await bot.sendChatAction(chatId, "typing");
+          const emailContent = await generateEmail(description);
+          await bot.sendMessage(
+            chatId,
+            `📧 *Email generated:*\n\n${emailContent}`,
+            {
+              parse_mode: "Markdown",
+            },
+          );
+        } catch (error) {
+          console.error("Email command error:", error);
+          await bot.sendMessage(
+            chatId,
+            "❌ **Error!** Could not generate the email. Please try again. 🔄",
+            { parse_mode: "Markdown" },
+          );
+        }
+      } else {
+        await bot.sendMessage(
+          chatId,
+          "📧 *How to use /email:*\n\nDescribe your email in English or Arabic and the bot will write it in formal French.\n\n*Examples:*\n• `/email ask the professor to postpone the exam`\n• `/email request an appointment with the dean`\n• `/email طلب تمديد في تسليم التقرير`",
+          { parse_mode: "Markdown" },
+        );
+      }
+    } else if (
+      sanitizedText === "/email" ||
+      sanitizedText === "/email@tagallesisbabot"
+    ) {
+      await bot.sendMessage(
+        chatId,
+        "📧 *How to use /email:*\n\nDescribe your email in English or Arabic and the bot will write it in formal French.\n\n*Examples:*\n• `/email ask the professor to postpone the exam`\n• `/email request an appointment with the dean`\n• `/email طلب تمديد في تسليم التقرير`",
+        { parse_mode: "Markdown" },
+      );
+    }
+
     // check affichage:
     if (
       sanitizedText === "/check" ||
@@ -1706,12 +2152,40 @@ export default async function handler(event) {
 
         await bot.sendChatAction(chatId, "typing");
         const replyContext = msg.reply_to_message?.text || null;
-        const aiResponse = await generateAIResponse(
-          question,
-          chatId,
-          userId,
-          replyContext,
-        );
+
+        // Check if replying to a file — pass it to Gemini as multimodal
+        const replyFileInfo = extractFileFromMessage(msg.reply_to_message);
+        let aiResponse;
+        if (replyFileInfo) {
+          try {
+            const fileBase64 = await downloadTelegramFile(replyFileInfo.fileId);
+            const filePrompt = `${replyContext ? `[Replying to a file${replyContext ? ` with caption: "${replyContext}"` : ""}]\n` : ""}${question}`;
+            aiResponse = await callGeminiAPIMultimodal(
+              filePrompt,
+              fileBase64,
+              replyFileInfo.mimeType,
+            );
+          } catch (e) {
+            console.error(
+              "File fetch for /ask failed, falling back to text",
+              e,
+            );
+            aiResponse = await generateAIResponse(
+              question,
+              chatId,
+              userId,
+              replyContext,
+            );
+          }
+        } else {
+          aiResponse = await generateAIResponse(
+            question,
+            chatId,
+            userId,
+            replyContext,
+          );
+        }
+
         await bot.sendMessage(chatId, `🤖 ${aiResponse}`, {
           parse_mode: "Markdown",
         });
