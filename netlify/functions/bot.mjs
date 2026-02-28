@@ -1466,6 +1466,20 @@ async function staticCommands(text, chatId, userId, msg) {
                 { text: "🔥 Hot Take", callback_data: "game_hottake" },
                 { text: "🧩 Riddle", callback_data: "game_riddle" },
               ],
+              [
+                { text: "📖 Story Builder", callback_data: "game_story" },
+                {
+                  text: "✏️ Finish the Sentence",
+                  callback_data: "game_finish",
+                },
+              ],
+              [
+                { text: "🔡 Acronym", callback_data: "game_acronym" },
+                {
+                  text: "😤 Unpopular Opinion",
+                  callback_data: "game_unpopular",
+                },
+              ],
             ],
           },
         },
@@ -1541,29 +1555,58 @@ const GAMES = {
   dare: {
     label: "😈 Dare",
     prompt:
-      "Generate one dare challenge for a university student group — silly or bold but appropriate. Just the dare text, nothing else.",
+      "Generate one dare challenge for a university student group — silly or bold but appropriate. Just the dare, nothing else.",
   },
   wyr: {
     label: "🤔 Would You Rather",
     prompt:
-      "Generate one 'Would You Rather' question for a university group chat. Format only as: 'Would you rather [A] or [B]?' — nothing else.",
+      "Generate one 'Would You Rather' dilemma for a university group chat. Make both options genuinely hard to choose between. Format only as: 'Would you rather [A] or [B]?' — nothing else.",
   },
   trivia: {
     label: "🧠 Trivia",
     prompt:
-      "Generate one fun trivia question with 4 options labeled A, B, C, D. At the end add the answer as: ||Answer: X||. Nothing else.",
+      "Generate one fun trivia question with 4 options labeled A, B, C, D. On the last line write only: ||Answer: X|| where X is the correct letter. Nothing else.",
   },
   hottake: {
     label: "🔥 Hot Take",
     prompt:
-      "Generate one spicy hot take or controversial opinion about university life or pop culture for group debate. Just the statement, nothing else.",
+      "Generate one spicy controversial opinion about university life or pop culture for group debate. Just the statement, nothing else. Make it genuinely divisive so people want to argue.",
   },
   riddle: {
     label: "🧩 Riddle",
     prompt:
-      "Give one fun riddle. Then on a new line put the answer as a spoiler: ||Answer: ...||. Nothing else.",
+      "Give one clever riddle suitable for a university group. On the last line write only: ||Answer: [answer]|| — nothing else after that.",
+  },
+  story: {
+    label: "📖 Story Builder",
+    prompt:
+      "Start a collaborative story with exactly ONE sentence — make it intriguing, funny, or dramatic so people want to continue it. End with '...' to signal others should add to it. Nothing else.",
+  },
+  finish: {
+    label: "✏️ Finish the Sentence",
+    prompt:
+      "Give one funny or thought-provoking incomplete sentence for a university group to finish. Example format: 'The professor walked in and suddenly...' — just the incomplete sentence, nothing else.",
+  },
+  acronym: {
+    label: "🔡 Acronym",
+    prompt:
+      "Give one 4 or 5 letter acronym (capital letters only, no explanation) then on the next line say: 'Make a funny/creative sentence where each word starts with these letters!' — nothing else.",
+  },
+  unpopular: {
+    label: "😤 Unpopular Opinion",
+    prompt:
+      "Give one genuinely unpopular opinion that most people would disagree with but is fun to debate in a group. Just the opinion as a statement, nothing else.",
   },
 };
+
+// Convert AI response to safe HTML, turning ||spoiler|| into Telegram spoiler tags
+function formatGameMessage(text) {
+  const escaped = text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+  return escaped.replace(/\|\|(.+?)\|\|/gs, "<tg-spoiler>$1</tg-spoiler>");
+}
 
 async function handleGameCallback(callbackQuery) {
   const chatId = callbackQuery.message.chat.id;
@@ -1585,10 +1628,11 @@ async function handleGameCallback(callbackQuery) {
   try {
     await bot.sendChatAction(chatId, "typing");
     const content = await callGeminiAPI(game.prompt);
+    const formatted = formatGameMessage(content);
     await bot.sendMessage(
       chatId,
-      `${game.label} — picked by *${callerName}*\n\n${content}`,
-      { parse_mode: "Markdown" },
+      `<b>${game.label}</b> — picked by <b>${callerName}</b>\n\n${formatted}`,
+      { parse_mode: "HTML" },
     );
   } catch (error) {
     console.error("Game callback error:", error);
