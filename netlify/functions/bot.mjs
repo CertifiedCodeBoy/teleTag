@@ -368,6 +368,7 @@ class DatabaseManager {
       await this.db
         .collection("apiUsage")
         .createIndex({ date: 1 }, { expireAfterSeconds: 86400 });
+      await this.db.collection("wheelOptions").createIndex({ chatId: 1 });
     } catch (error) {
       console.error("Error creating indexes:", error);
     }
@@ -850,6 +851,88 @@ async function updateReminders(chatId, reminders) {
   cache.delete(cacheKey);
 
   return result;
+}
+
+async function getWheelOptions(chatId) {
+  const cacheKey = getCacheKey("wheel", chatId);
+  const cached = getFromCache(cacheKey);
+  if (cached) return cached;
+
+  const collection = dbManager.getCollection("wheelOptions");
+  const data = await collection.findOne({ chatId });
+  const result = data || { chatId, options: [] };
+
+  setCache(cacheKey, result);
+  return result;
+}
+
+async function updateWheelOptions(chatId, options) {
+  const collection = dbManager.getCollection("wheelOptions");
+  await collection.updateOne(
+    { chatId },
+    { $set: { options, lastUpdated: new Date() } },
+    { upsert: true },
+  );
+  const cacheKey = getCacheKey("wheel", chatId);
+  cache.delete(cacheKey);
+}
+
+async function spinWheel(chatId, options) {
+  const winner = options[Math.floor(Math.random() * options.length)];
+
+  // Build the initial message with pointer on top item
+  function buildFrame(highlighted) {
+    return options
+      .map((o) => (o === highlighted ? `▶️ *${o}* ◀️` : `     ${o}`))
+      .join("\n");
+  }
+
+  const sent = await bot.sendMessage(
+    chatId,
+    `🎡 *Spinning the wheel...*\n\n${buildFrame(options[0])}`,
+    { parse_mode: "Markdown" },
+  );
+
+  // Animate: cycle pointer through options a few times then land on winner
+  const frames = [];
+  const cycles = 2;
+  for (let c = 0; c < cycles; c++) {
+    for (const o of options) frames.push(o);
+  }
+  // Slow down toward the end by repeating winner neighbours
+  frames.push(
+    options[(options.indexOf(winner) - 1 + options.length) % options.length],
+  );
+  frames.push(winner);
+
+  const delays = frames.map((_, i) => {
+    // Start fast (150ms), ease out to 500ms over last quarter
+    const progress = i / frames.length;
+    return Math.round(150 + progress * 350);
+  });
+
+  for (let i = 0; i < frames.length; i++) {
+    await new Promise((r) => setTimeout(r, delays[i]));
+    try {
+      await bot.editMessageText(
+        `🎡 *Spinning the wheel...*\n\n${buildFrame(frames[i])}`,
+        {
+          chat_id: chatId,
+          message_id: sent.message_id,
+          parse_mode: "Markdown",
+        },
+      );
+    } catch (_) {
+      /* ignore edit-too-fast errors */
+    }
+  }
+
+  // Final result
+  await new Promise((r) => setTimeout(r, 600));
+  await bot.editMessageText(
+    `🎡 *The wheel has spoken!*\n\n🏆 **${winner}** 🎉`,
+    { chat_id: chatId, message_id: sent.message_id, parse_mode: "Markdown" },
+  );
 }
 
 // Enhanced AI conversation functions
@@ -1339,6 +1422,22 @@ const commands = [
   {
     command: "qcm",
     description: "Generate a QCM quiz on a topic",
+  },
+  {
+    command: "wheel",
+    description: "Spin a wheel — /wheel opt1, opt2, opt3",
+  },
+  {
+    command: "wheeladd",
+    description: "Add an option to the group wheel",
+  },
+  {
+    command: "wheelremove",
+    description: "Remove an option from the group wheel by index",
+  },
+  {
+    command: "wheelshow",
+    description: "Show saved wheel options for this group",
   },
 ];
 
@@ -1978,6 +2077,121 @@ async function staticCommands(text, chatId, userId, msg) {
         );
       }
     }
+
+    // /wheel command
+    if (
+      sanitizedText.startsWith("/wheel ") ||
+      sanitizedText.startsWith("/wheel@tagallesisbabot ") ||
+      sanitizedText === "/wheel" ||
+      sanitizedText === "/wheel@tagallesisbabot"
+    ) {
+      const inlineOptions = sanitizedText
+        .replace(/^\/wheel(@tagallesisbabot)?\s*/, "")
+        .split(",")
+        .map((o) => o.trim())
+        .filter((o) => o.length > 0);
+
+      if (inlineOptions.length >= 2) {
+        await spinWheel(chatId, inlineOptions);
+      } else if (inlineOptions.length === 1) {
+        await bot.sendMessage(
+          chatId,
+          "⚠️ *Need at least 2 options to spin!*\n\n*Example:* `/wheel pizza, sushi, burgers`",
+          { parse_mode: "Markdown" },
+        );
+      } else {
+        // Fall back to saved group wheel
+        const wheelData = await getWheelOptions(chatId);
+        if (wheelData.options.length >= 2) {
+          await spinWheel(chatId, wheelData.options);
+        } else {
+          await bot.sendMessage(
+            chatId,
+            "🎡 *How to use /wheel:*\n\n• *Inline:* `/wheel pizza, sushi, burgers`\n• *Saved wheel:* add options with `/wheeladd option`, then just `/wheel`\n\n*Need at least 2 options to spin!*",
+            { parse_mode: "Markdown" },
+          );
+        }
+      }
+    }
+
+    // /wheeladd
+    if (
+      sanitizedText.startsWith("/wheeladd ") ||
+      sanitizedText.startsWith("/wheeladd@tagallesisbabot ")
+    ) {
+      const option = sanitizedText
+        .replace(/^\/wheeladd(@tagallesisbabot)?\s+/, "")
+        .trim();
+      if (option) {
+        const wheelData = await getWheelOptions(chatId);
+        if (wheelData.options.includes(option)) {
+          await bot.sendMessage(
+            chatId,
+            `ℹ️ *"${option}"* is already in the wheel!`,
+            { parse_mode: "Markdown" },
+          );
+        } else {
+          wheelData.options.push(option);
+          await updateWheelOptions(chatId, wheelData.options);
+          await bot.sendMessage(
+            chatId,
+            `✅ Added *"${option}"* to the wheel! *(${wheelData.options.length} options total)*`,
+            { parse_mode: "Markdown" },
+          );
+        }
+      }
+    }
+
+    // /wheelremove
+    if (
+      sanitizedText.startsWith("/wheelremove ") ||
+      sanitizedText.startsWith("/wheelremove@tagallesisbabot ")
+    ) {
+      const wheelData = await getWheelOptions(chatId);
+      const indexStr = sanitizedText
+        .replace(/^\/wheelremove(@tagallesisbabot)?\s+/, "")
+        .trim();
+      const index = parseInt(indexStr, 10) - 1;
+      if (isNaN(index) || index < 0 || index >= wheelData.options.length) {
+        await bot.sendMessage(
+          chatId,
+          `❌ Invalid index. Use \`/wheelshow\` to see the list.`,
+          { parse_mode: "Markdown" },
+        );
+      } else {
+        const removed = wheelData.options.splice(index, 1)[0];
+        await updateWheelOptions(chatId, wheelData.options);
+        await bot.sendMessage(
+          chatId,
+          `🗑️ Removed *"${removed}"* from the wheel.`,
+          { parse_mode: "Markdown" },
+        );
+      }
+    }
+
+    // /wheelshow
+    if (
+      sanitizedText === "/wheelshow" ||
+      sanitizedText === "/wheelshow@tagallesisbabot"
+    ) {
+      const wheelData = await getWheelOptions(chatId);
+      if (wheelData.options.length === 0) {
+        await bot.sendMessage(
+          chatId,
+          "📭 *No saved wheel options yet.*\n\nUse `/wheeladd option` to add some!",
+          { parse_mode: "Markdown" },
+        );
+      } else {
+        const list = wheelData.options
+          .map((o, i) => `${i + 1}. ${o}`)
+          .join("\n");
+        await bot.sendMessage(
+          chatId,
+          `🎡 *Saved wheel options (${wheelData.options.length}):*\n\n${list}\n\nSpin with \`/wheel\` or remove one with \`/wheelremove {index}\``,
+          { parse_mode: "Markdown" },
+        );
+      }
+    }
   } catch (error) {
     console.error("Error in staticCommands:", error);
     await bot.sendMessage(
@@ -2108,6 +2322,25 @@ export default async function handler(event) {
     }
 
     const msg = body.message;
+
+    // Auto-register new members when they join the group
+    if (msg && msg.new_chat_members) {
+      const chatId = msg.chat.id;
+      const groupData = await getGroupMembers(chatId);
+      let changed = false;
+      for (const newMember of msg.new_chat_members) {
+        if (newMember.is_bot) continue;
+        if (!groupData.members.some((m) => m.id === newMember.id)) {
+          groupData.members.push({
+            id: newMember.id,
+            first_name: newMember.first_name,
+          });
+          changed = true;
+        }
+      }
+      if (changed) await updateGroupMembers(chatId, groupData.members);
+    }
+
     if (!msg || !msg.text) {
       return new Response(
         JSON.stringify({ message: "No message or text to process" }),
@@ -2118,6 +2351,15 @@ export default async function handler(event) {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
     const text = sanitizeInput(msg.text);
+
+    // Silently auto-register sender if not already in DB
+    if (msg.from && !msg.from.is_bot) {
+      const groupData = await getGroupMembers(chatId);
+      if (!groupData.members.some((m) => m.id === userId)) {
+        groupData.members.push({ id: userId, first_name: msg.from.first_name });
+        await updateGroupMembers(chatId, groupData.members);
+      }
+    }
 
     // Handle static commands first
     await staticCommands(text, chatId, userId, msg);
