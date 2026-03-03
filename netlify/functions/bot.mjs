@@ -1060,7 +1060,7 @@ ${sanitizedPrompt}`
     if (error instanceof BotError) {
       switch (error.code) {
         case "QUOTA_EXCEEDED":
-          return "⚠️ **API quota exceeded!** You've reached your free tier limit. Please try again tomorrow or upgrade your plan.";
+          return "ولي غدوة وليدو";
         case "RATE_LIMIT":
           return "⚠️ **Too many requests. ** Please wait a moment before trying again.";
         case "INVALID_PROMPT":
@@ -1940,7 +1940,7 @@ async function staticCommands(text, chatId, userId, msg) {
           console.error("Solve command error:", error);
           const msg_err =
             error instanceof BotError && error.code === "QUOTA_EXCEEDED"
-              ? "⚠️ API quota exceeded. Try again later."
+              ? "ولي غدوة وليدو"
               : "❌ Failed to solve. Make sure the file is an image or PDF and try again.";
           await bot.sendMessage(chatId, msg_err);
         }
