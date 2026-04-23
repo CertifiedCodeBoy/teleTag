@@ -1,5 +1,8 @@
 import crypto from "node:crypto";
 
+// Disable SSL verification for ONOU API (equivalent to Python's verify=False)
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+
 export const WEBETU_BASE = "https://api-webetu.mesrs.dz";
 export const ONOU_BASE = "https://gs-api.onou.dz";
 export const HMAC_SECRET = "pUzHUW2WX54uCzhO8JC2eQ6g1Ol21upw";
@@ -252,7 +255,7 @@ export async function authenticateWebEtu(username, password) {
       rawData: data,
     };
   } catch (error) {
-    console.log('[RESERVE] authenticateWebEtu EXCEPTION', { error: error.message });
+    console.log('[RESERVE] authenticateWebEtu EXCEPTION', { error: error.message, cause: error.cause?.message || error.cause?.code || String(error.cause || '') });
     return {
       ok: false,
       status: 0,
@@ -327,7 +330,7 @@ export async function exchangeOnouToken({
       rawData: data,
     };
   } catch (error) {
-    console.log('[RESERVE] exchangeOnouToken EXCEPTION', { error: error.message });
+    console.log('[RESERVE] exchangeOnouToken EXCEPTION', { error: error.message, cause: error.cause?.message || error.cause?.code || String(error.cause || '') });
     return {
       ok: false,
       status: 0,
