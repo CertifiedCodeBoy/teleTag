@@ -200,6 +200,7 @@ export function maskIdentifier(value = "") {
 }
 
 export async function authenticateWebEtu(username, password) {
+  console.log('[RESERVE] authenticateWebEtu START', { username });
   const loginBody = JSON.stringify({ username, password });
 
   try {
@@ -211,8 +212,10 @@ export async function authenticateWebEtu(username, password) {
 
     const raw = await response.text();
     const data = safeJsonParse(raw, {});
+    console.log('[RESERVE] authenticateWebEtu response', { status: response.status, ok: response.ok });
 
     if (!response.ok) {
+      console.log('[RESERVE] authenticateWebEtu FAILED', { status: response.status, error: data?.message || raw });
       return {
         ok: false,
         status: response.status,
@@ -230,6 +233,7 @@ export async function authenticateWebEtu(username, password) {
     const idDia = extractJsonField(data, ["idDia", "data.idDia"]);
 
     if (!uuid || !token) {
+      console.log('[RESERVE] authenticateWebEtu FAILED - missing uuid/token');
       return {
         ok: false,
         status: response.status,
@@ -237,6 +241,7 @@ export async function authenticateWebEtu(username, password) {
       };
     }
 
+    console.log('[RESERVE] authenticateWebEtu SUCCESS', { uuid, idIndividu, idDia });
     return {
       ok: true,
       status: response.status,
@@ -247,6 +252,7 @@ export async function authenticateWebEtu(username, password) {
       rawData: data,
     };
   } catch (error) {
+    console.log('[RESERVE] authenticateWebEtu EXCEPTION', { error: error.message });
     return {
       ok: false,
       status: 0,
@@ -263,6 +269,7 @@ export async function exchangeOnouToken({
   idIndividu = null,
   idDia = null,
 }) {
+  console.log('[RESERVE] exchangeOnouToken START', { uuid, wilaya, residence });
   try {
     const url = new URL(`${ONOU_BASE}/api/loginpwebetu`);
     url.searchParams.set("uuid", String(uuid));
@@ -281,8 +288,10 @@ export async function exchangeOnouToken({
 
     const raw = await response.text();
     const data = safeJsonParse(raw, {});
+    console.log('[RESERVE] exchangeOnouToken response', { status: response.status, ok: response.ok });
 
     if (!response.ok) {
+      console.log('[RESERVE] exchangeOnouToken FAILED', { status: response.status, error: data?.message || raw });
       return {
         ok: false,
         status: response.status,
@@ -302,6 +311,7 @@ export async function exchangeOnouToken({
       ]) || null;
 
     if (!onouToken) {
+      console.log('[RESERVE] exchangeOnouToken FAILED - no token in response');
       return {
         ok: false,
         status: response.status,
@@ -309,6 +319,7 @@ export async function exchangeOnouToken({
       };
     }
 
+    console.log('[RESERVE] exchangeOnouToken SUCCESS');
     return {
       ok: true,
       status: response.status,
@@ -316,6 +327,7 @@ export async function exchangeOnouToken({
       rawData: data,
     };
   } catch (error) {
+    console.log('[RESERVE] exchangeOnouToken EXCEPTION', { error: error.message });
     return {
       ok: false,
       status: 0,
@@ -383,6 +395,7 @@ export function normalizeDepots(rawData) {
 }
 
 export async function fetchDepots({ uuid, onouToken, wilaya, residence }) {
+  console.log('[RESERVE] fetchDepots START', { wilaya, residence });
   try {
     const url = new URL(`${ONOU_BASE}/api/getdepotres`);
     url.searchParams.set("uuid", String(uuid));
@@ -397,8 +410,10 @@ export async function fetchDepots({ uuid, onouToken, wilaya, residence }) {
 
     const raw = await response.text();
     const data = safeJsonParse(raw, null);
+    console.log('[RESERVE] fetchDepots response', { status: response.status, ok: response.ok });
 
     if (!response.ok) {
+      console.log('[RESERVE] fetchDepots FAILED', { status: response.status, error: raw });
       return {
         ok: false,
         status: response.status,
@@ -407,13 +422,16 @@ export async function fetchDepots({ uuid, onouToken, wilaya, residence }) {
       };
     }
 
+    const depots = normalizeDepots(data);
+    console.log('[RESERVE] fetchDepots SUCCESS', { depotCount: depots.length });
     return {
       ok: true,
       status: response.status,
-      depots: normalizeDepots(data),
+      depots,
       rawData: data,
     };
   } catch (error) {
+    console.log('[RESERVE] fetchDepots EXCEPTION', { error: error.message });
     return {
       ok: false,
       status: 0,
@@ -429,6 +447,7 @@ export async function fetchCurrentReservations({
   wilaya,
   residence,
 }) {
+  console.log('[RESERVE] fetchCurrentReservations START', { wilaya, residence });
   try {
     const url = new URL(`${ONOU_BASE}/api/meal-reservations/student`);
     url.searchParams.set("uuid", String(uuid));
@@ -445,6 +464,7 @@ export async function fetchCurrentReservations({
     const data = safeJsonParse(raw, {});
 
     if (!response.ok) {
+      console.log('[RESERVE] fetchCurrentReservations FAILED', { status: response.status });
       return {
         ok: false,
         status: response.status,
@@ -462,6 +482,7 @@ export async function fetchCurrentReservations({
         ? data
         : [];
 
+    console.log('[RESERVE] fetchCurrentReservations SUCCESS', { count: reservations.length });
     return {
       ok: true,
       status: response.status,
@@ -532,6 +553,7 @@ export async function reserveMeals({
   mealTypes,
   existingReservations = [],
 }) {
+  console.log('[RESERVE] reserveMeals START', { idDepot, dateStrings, mealTypes, existingCount: existingReservations.length });
   const existingSet = buildExistingReservationSet(existingReservations);
 
   const detailObjects = [];
@@ -548,6 +570,7 @@ export async function reserveMeals({
   }
 
   if (detailObjects.length === 0) {
+    console.log('[RESERVE] reserveMeals - everything already reserved');
     return {
       ok: true,
       status: 200,
@@ -576,8 +599,10 @@ export async function reserveMeals({
 
     const raw = await response.text();
     const data = safeJsonParse(raw, { raw });
+    console.log('[RESERVE] reserveMeals response', { status: response.status, ok: response.ok, detailCount: detailObjects.length });
 
     if (!response.ok) {
+      console.log('[RESERVE] reserveMeals FAILED', { status: response.status, error: data?.message || raw });
       return {
         ok: false,
         status: response.status,
@@ -590,6 +615,7 @@ export async function reserveMeals({
       };
     }
 
+    console.log('[RESERVE] reserveMeals SUCCESS', { submittedCount: detailObjects.length });
     return {
       ok: true,
       status: response.status,
@@ -651,6 +677,7 @@ export async function fetchResidenceSuggestions({
   wilaya = "22",
   maxSuggestions = 8,
 }) {
+  console.log('[RESERVE] fetchResidenceSuggestions START', { username, wilaya, maxSuggestions });
   const auth = await authenticateWebEtu(username, password);
   if (!auth.ok) {
     return {
@@ -712,6 +739,7 @@ export async function fetchResidenceSuggestions({
     }
   }
 
+  console.log('[RESERVE] fetchResidenceSuggestions DONE', { suggestionsFound: suggestions.length });
   return {
     ok: suggestions.length > 0,
     suggestions,
@@ -726,6 +754,7 @@ export async function executeReservationForAccounts(
   profile,
   { daysAhead = 1 } = {},
 ) {
+  console.log('[RESERVE] executeReservationForAccounts START', { accountCount: profile.accounts?.length, daysAhead });
   const dateStrings = buildReservationDates(daysAhead);
   const mealTypes =
     Array.isArray(profile.mealTypes) && profile.mealTypes.length > 0
@@ -745,6 +774,7 @@ export async function executeReservationForAccounts(
 
   for (const account of profile.accounts || []) {
     const username = account.username;
+    console.log('[RESERVE] processing account', { username });
     try {
       const password = decryptSecret(account.passwordEncrypted);
 
@@ -842,6 +872,7 @@ export async function executeReservationForAccounts(
         idDepot,
         depotLabel,
       });
+      console.log('[RESERVE] account completed successfully', { username, submitted: reservationResult.submittedCount, skipped: reservationResult.skippedAsExisting });
     } catch (error) {
       results.push({
         username,
@@ -858,6 +889,7 @@ export async function executeReservationForAccounts(
   const overallStatus =
     failedCount === 0 ? "success" : successCount === 0 ? "failed" : "partial";
 
+  console.log('[RESERVE] executeReservationForAccounts DONE', { overallStatus, successCount, failedCount });
   return {
     overallStatus,
     successCount,

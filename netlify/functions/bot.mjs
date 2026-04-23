@@ -588,8 +588,7 @@ async function callGeminiAPI(prompt, retries = CONFIG.MAX_RETRIES) {
       }
 
       throw new BotError(
-        `Gemini API error: ${response.status} - ${
-          errorData.error?.message || "Unknown error"
+        `Gemini API error: ${response.status} - ${errorData.error?.message || "Unknown error"
         }`,
         "API_ERROR",
         response.status,
@@ -924,11 +923,11 @@ function formatReservationHealth(snapshot) {
 
   const recentIssuesText = snapshot.recentIssues.length
     ? snapshot.recentIssues
-        .map((item, index) => {
-          const run = item.lastRun || {};
-          return `${index + 1}. user ${item.ownerUserId} | ${run.status || "unknown"} | attempt ${run.attempt || 0}/2 | success ${run.successCount || 0} | failed ${run.failedCount || 0}`;
-        })
-        .join("\n")
+      .map((item, index) => {
+        const run = item.lastRun || {};
+        return `${index + 1}. user ${item.ownerUserId} | ${run.status || "unknown"} | attempt ${run.attempt || 0}/2 | success ${run.successCount || 0} | failed ${run.failedCount || 0}`;
+      })
+      .join("\n")
     : "None";
 
   return [
@@ -1175,6 +1174,7 @@ async function getReserveOnboarding(userId) {
 
 async function saveReserveOnboarding(userId, payload) {
   const { _id, createdAt, updatedAt, ...safePayload } = payload || {};
+  console.log('[RESERVE] saveReserveOnboarding', { userId, step: safePayload.step });
   const collection = dbManager.getCollection("mealReservationOnboarding");
   await collection.updateOne(
     { userId },
@@ -1322,10 +1322,10 @@ function formatReservationStatus(profile) {
 
   const lastRun = profile.lastRun
     ? `${profile.lastRun.status} on ${new Date(
-        profile.lastRun.attemptedAt,
-      ).toLocaleString("fr-FR", {
-        timeZone: "Africa/Algiers",
-      })}`
+      profile.lastRun.attemptedAt,
+    ).toLocaleString("fr-FR", {
+      timeZone: "Africa/Algiers",
+    })}`
     : "No run yet";
 
   return [
@@ -1341,6 +1341,7 @@ function formatReservationStatus(profile) {
 }
 
 async function fetchDepotCandidatesForResidence(account, wilaya, residence) {
+  console.log('[RESERVE] fetchDepotCandidatesForResidence START', { username: account.username, wilaya, residence });
   try {
     const password = decryptSecret(account.passwordEncrypted);
     const auth = await authenticateWebEtu(account.username, password);
@@ -1392,6 +1393,7 @@ async function fetchDepotCandidatesForResidence(account, wilaya, residence) {
       depotLabel: depot.depotLabel,
     }));
 
+    console.log('[RESERVE] fetchDepotCandidatesForResidence SUCCESS', { candidateCount: candidates.length });
     return { ok: true, candidates };
   } catch (error) {
     return {
@@ -1403,6 +1405,7 @@ async function fetchDepotCandidatesForResidence(account, wilaya, residence) {
 }
 
 async function verifyAndEncryptAccounts(accounts) {
+  console.log('[RESERVE] verifyAndEncryptAccounts START', { accountCount: accounts.length });
   const valid = [];
   const invalid = [];
 
@@ -1435,11 +1438,14 @@ async function verifyAndEncryptAccounts(accounts) {
     });
   }
 
+  console.log('[RESERVE] verifyAndEncryptAccounts DONE', { validCount: valid.length, invalidCount: invalid.length });
   return { valid, invalid };
 }
 
 async function startReserveOnboarding(chatId, userId, isEdit = false) {
+  console.log('[RESERVE] startReserveOnboarding', { chatId, userId, isEdit });
   if (!hasEncryptionKey()) {
+    console.log('[RESERVE] encryption key missing, aborting onboarding');
     await bot.sendMessage(
       chatId,
       "Reservation setup is not available right now because encryption is not configured on the server.",
@@ -1477,6 +1483,7 @@ async function finalizeReserveConfiguration(
   state,
   scheduleMode,
 ) {
+  console.log('[RESERVE] finalizeReserveConfiguration START', { userId, scheduleMode, mode: state.mode, accountCount: state.accounts?.length, residence: state.residence?.label });
   const autoEnabled = scheduleMode === "auto";
   const reserveDaysAhead = autoEnabled ? 3 : 1;
 
@@ -1494,6 +1501,7 @@ async function finalizeReserveConfiguration(
   };
 
   const profile = await upsertMealReservationProfile(userId, payload);
+  console.log('[RESERVE] profile saved, starting reservation run', { autoEnabled, reserveDaysAhead });
 
   await bot.sendMessage(
     chatId,
@@ -1506,6 +1514,7 @@ async function finalizeReserveConfiguration(
     daysAhead: reserveDaysAhead,
   });
 
+  console.log('[RESERVE] reservation run completed', { overallStatus: runResult.overallStatus, successCount: runResult.successCount, failedCount: runResult.failedCount });
   await saveMealReservationRun(userId, {
     status: runResult.overallStatus,
     attemptedAt: new Date().toISOString(),
@@ -1516,6 +1525,7 @@ async function finalizeReserveConfiguration(
   });
 
   await clearReserveOnboarding(userId);
+  console.log('[RESERVE] finalizeReserveConfiguration DONE', { userId });
 
   const modeText = autoEnabled
     ? "Auto mode is enabled. Daily execution should run at 23:00 Algeria time and reserve next 3 days."
@@ -1576,6 +1586,7 @@ async function handleReserveFlowText(msg, text) {
   const chatId = msg.chat.id;
   const state = await getReserveOnboarding(userId);
   if (!state) return false;
+  console.log('[RESERVE] handleReserveFlowText', { userId, step: state.step });
 
   const normalizedCommand = normalizeBotCommand(text);
   if (RESERVE_COMMANDS.has(normalizedCommand)) {
@@ -1592,6 +1603,7 @@ async function handleReserveFlowText(msg, text) {
 
   if (state.step === "single_username") {
     const username = text.trim();
+    console.log('[RESERVE] single_username received', { userId, username });
     if (!username) {
       await bot.sendMessage(
         chatId,
@@ -1633,8 +1645,10 @@ async function handleReserveFlowText(msg, text) {
     }
 
     await bot.sendMessage(chatId, "Verifying credentials...");
+    console.log('[RESERVE] single_password verifying', { userId, username: state.tempUsername });
     const auth = await authenticateWebEtu(state.tempUsername, password);
     if (!auth.ok) {
+      console.log('[RESERVE] single_password auth FAILED', { userId, error: auth.error });
       await bot.sendMessage(
         chatId,
         `Credentials not valid for ${maskIdentifier(state.tempUsername)}. Error: ${auth.error}\n\nTry again or use /reservecancel.`,
@@ -1642,6 +1656,7 @@ async function handleReserveFlowText(msg, text) {
       return true;
     }
 
+    console.log('[RESERVE] single_password auth SUCCESS, moving to pick_residence', { userId });
     await saveReserveOnboarding(userId, {
       ...state,
       mode: "single",
@@ -1661,6 +1676,7 @@ async function handleReserveFlowText(msg, text) {
   }
 
   if (state.step === "chunk_credentials") {
+    console.log('[RESERVE] chunk_credentials received', { userId });
     const parsed = parseChunkCredentials(text);
 
     if (parsed.validEntries.length === 0) {
@@ -1672,6 +1688,7 @@ async function handleReserveFlowText(msg, text) {
     }
 
     await bot.sendMessage(chatId, "Verifying chunk credentials...");
+    console.log('[RESERVE] chunk_credentials verifying', { userId, validEntries: parsed.validEntries.length, invalidEntries: parsed.invalidEntries.length });
     const verification = await verifyAndEncryptAccounts(parsed.validEntries);
 
     if (verification.valid.length === 0) {
@@ -1687,6 +1704,7 @@ async function handleReserveFlowText(msg, text) {
     }
 
     if (verification.invalid.length > 0 || parsed.invalidEntries.length > 0) {
+      console.log('[RESERVE] chunk partial - some accounts failed', { userId, validCount: verification.valid.length, invalidCount: verification.invalid.length });
       const invalidFromFormat = parsed.invalidEntries.map(
         (item) => `- ${item} (invalid format)`,
       );
@@ -1712,6 +1730,7 @@ async function handleReserveFlowText(msg, text) {
       return true;
     }
 
+    console.log('[RESERVE] chunk all valid, moving to pick_residence', { userId, accountCount: verification.valid.length });
     await saveReserveOnboarding(userId, {
       ...state,
       mode: "chunk",
@@ -1724,6 +1743,7 @@ async function handleReserveFlowText(msg, text) {
   }
 
   if (state.step === "manual_residence_input") {
+    console.log('[RESERVE] manual_residence_input received', { userId, text });
     const parts = text
       .split(",")
       .map((part) => part.trim())
@@ -1823,6 +1843,7 @@ async function handleReserveFlowText(msg, text) {
 async function handleReserveCallback(callbackQuery) {
   const data = callbackQuery.data || "";
   if (!data.startsWith("reserve:")) return false;
+  console.log('[RESERVE] handleReserveCallback', { data, userId: callbackQuery.from.id });
 
   try {
     await bot.answerCallbackQuery(callbackQuery.id);
@@ -1843,6 +1864,7 @@ async function handleReserveCallback(callbackQuery) {
   }
 
   if (data === "reserve:cancel") {
+    console.log('[RESERVE] user cancelled setup', { userId });
     await clearReserveOnboarding(userId);
     await bot.sendMessage(chatId, "Reservation setup canceled.");
     return true;
@@ -1850,14 +1872,17 @@ async function handleReserveCallback(callbackQuery) {
 
   const state = await getReserveOnboarding(userId);
   if (!state) {
+    console.log('[RESERVE] onboarding session not found (expired)', { userId });
     await bot.sendMessage(
       chatId,
       "Setup session expired. Send /reserve to start again.",
     );
     return true;
   }
+  console.log('[RESERVE] current onboarding state', { userId, step: state.step, mode: state.mode });
 
   if (data === "reserve:mode:single") {
+    console.log('[RESERVE] mode selected: single', { userId });
     await saveReserveOnboarding(userId, {
       ...state,
       mode: "single",
@@ -1869,6 +1894,7 @@ async function handleReserveCallback(callbackQuery) {
   }
 
   if (data === "reserve:mode:chunk") {
+    console.log('[RESERVE] mode selected: chunk', { userId });
     await saveReserveOnboarding(userId, {
       ...state,
       mode: "chunk",
@@ -1922,6 +1948,7 @@ async function handleReserveCallback(callbackQuery) {
   }
 
   if (data === "reserve:residence:default") {
+    console.log('[RESERVE] residence selected: default (Cite 6)', { userId });
     await saveReserveOnboarding(userId, {
       ...state,
       residence: DEFAULT_RESIDENCE,
@@ -1948,6 +1975,7 @@ async function handleReserveCallback(callbackQuery) {
   }
 
   if (data === "reserve:residence:suggest") {
+    console.log('[RESERVE] residence: fetching suggestions', { userId });
     const baseAccount = state.accounts?.[0];
     if (!baseAccount) {
       await bot.sendMessage(
@@ -1980,6 +2008,7 @@ async function handleReserveCallback(callbackQuery) {
     });
 
     if (!suggestionsResult.ok || suggestionsResult.suggestions.length === 0) {
+      console.log('[RESERVE] residence suggestions FAILED', { error: suggestionsResult.error });
       await bot.sendMessage(
         chatId,
         `${suggestionsResult.error || "No suggestions available"}. You can pick manual residence instead.`,
@@ -2030,6 +2059,7 @@ async function handleReserveCallback(callbackQuery) {
     }
 
     const selected = state.depotCandidates[index];
+    console.log('[RESERVE] depot selected', { userId, label: selected.label, idDepot: selected.idDepot });
     await saveReserveOnboarding(userId, {
       ...state,
       residence: {
@@ -2099,12 +2129,14 @@ async function handleReserveCallback(callbackQuery) {
       ...state,
       step: "pick_schedule",
     });
+    console.log('[RESERVE] meals done, moving to schedule', { userId, mealTypes: selected });
     await askScheduleMode(chatId);
     return true;
   }
 
   if (data === "reserve:schedule:once" || data === "reserve:schedule:auto") {
     const mode = data.endsWith(":auto") ? "auto" : "once";
+    console.log('[RESERVE] schedule selected', { userId, mode });
 
     if (!Array.isArray(state.accounts) || state.accounts.length === 0) {
       await bot.sendMessage(
@@ -2124,6 +2156,7 @@ async function handleReserveCallback(callbackQuery) {
       return true;
     }
 
+    console.log('[RESERVE] calling finalizeReserveConfiguration', { userId, mode, accountCount: state.accounts.length, residence: state.residence?.label });
     await finalizeReserveConfiguration(userId, chatId, state, mode);
     return true;
   }
@@ -2852,8 +2885,8 @@ async function staticCommands(text, chatId, userId, msg) {
 
       const message = mentions.length
         ? `🔔 **Attention everyone!**\n\n${mentions.join(
-            " ",
-          )}\n\n*You've been summoned! * ⚡`
+          " ",
+        )}\n\n*You've been summoned! * ⚡`
         : "📭 **No members to mention.** The group is currently empty. ";
       await bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
     }
@@ -2942,8 +2975,8 @@ async function staticCommands(text, chatId, userId, msg) {
       );
       const message = mentions.length
         ? `🆘 **Help requested!**\n\n${mentions.join(
-            " ",
-          )}\n\n*Someone needs assistance!* 🚨`
+          " ",
+        )}\n\n*Someone needs assistance!* 🚨`
         : "📭 **No helpers available right now.** Try again later or ask in the group!  🤝";
       await bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
     }
@@ -3779,18 +3812,18 @@ export default async function handler(event) {
       const remindersData = await getReminders(chatId);
       const remindersMessage = remindersData.reminders.length
         ? remindersData.reminders
-            .map(
-              (reminder, index) =>
-                `${index + 1}. ${reminder.text} - ${new Date(
-                  reminder.date,
-                ).toLocaleDateString("fr-dz", {
-                  weekday: "long",
-                  day: "numeric",
-                  month: "long",
-                  year: "numeric",
-                })}`,
-            )
-            .join("\n")
+          .map(
+            (reminder, index) =>
+              `${index + 1}. ${reminder.text} - ${new Date(
+                reminder.date,
+              ).toLocaleDateString("fr-dz", {
+                weekday: "long",
+                day: "numeric",
+                month: "long",
+                year: "numeric",
+              })}`,
+          )
+          .join("\n")
         : "No reminders found.";
 
       await bot.sendMessage(chatId, remindersMessage);
@@ -3847,8 +3880,7 @@ export default async function handler(event) {
             chatId,
             `❌ **Invalid index(es):** \`${invalidIndexes.join(
               ", ",
-            )}\`\n\nPlease provide valid indexes between 1 and ${
-              remindersData.reminders.length
+            )}\`\n\nPlease provide valid indexes between 1 and ${remindersData.reminders.length
             }. 📋`,
             { parse_mode: "Markdown" },
           );
