@@ -1174,7 +1174,7 @@ async function getReserveOnboarding(userId) {
 }
 
 async function saveReserveOnboarding(userId, payload) {
-  const { _id, ...safePayload } = payload || {};
+  const { _id, createdAt, updatedAt, ...safePayload } = payload || {};
   const collection = dbManager.getCollection("mealReservationOnboarding");
   await collection.updateOne(
     { userId },
@@ -1205,7 +1205,7 @@ async function getMealReservationProfile(userId) {
 }
 
 async function upsertMealReservationProfile(userId, payload) {
-  const { _id, ...safePayload } = payload || {};
+  const { _id, createdAt, updatedAt, ...safePayload } = payload || {};
   const collection = dbManager.getCollection("mealReservations");
   await collection.updateOne(
     { ownerUserId: userId },
