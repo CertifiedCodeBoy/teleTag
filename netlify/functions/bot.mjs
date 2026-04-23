@@ -2,6 +2,21 @@
 import TelegramBot from "node-telegram-bot-api";
 import dotenv from "dotenv";
 import { MongoClient } from "mongodb";
+import {
+  DEFAULT_RESIDENCE,
+  MEAL_OPTIONS,
+  authenticateWebEtu,
+  decryptSecret,
+  encryptSecret,
+  executeReservationForAccounts,
+  exchangeOnouToken,
+  fetchDepots,
+  fetchResidenceSuggestions,
+  getAlgeriaDateKey,
+  hasEncryptionKey,
+  maskIdentifier,
+  parseChunkCredentials,
+} from "./reserve-utils.mjs";
 
 // affichage bot part:
 
@@ -369,6 +384,12 @@ class DatabaseManager {
         .collection("apiUsage")
         .createIndex({ date: 1 }, { expireAfterSeconds: 86400 });
       await this.db.collection("wheelOptions").createIndex({ chatId: 1 });
+      await this.db
+        .collection("mealReservations")
+        .createIndex({ ownerUserId: 1 }, { unique: true });
+      await this.db
+        .collection("mealReservationOnboarding")
+        .createIndex({ userId: 1 }, { unique: true });
     } catch (error) {
       console.error("Error creating indexes:", error);
     }
@@ -877,6 +898,1243 @@ async function updateWheelOptions(chatId, options) {
   cache.delete(cacheKey);
 }
 
+const RESERVE_COMMANDS = new Set([
+  "/reserve",
+  "/reserveedit",
+  "/reservestatus",
+  "/reservestop",
+  "/reservecancel",
+]);
+
+const ADMIN_USER_IDS = new Set(
+  String(process.env.ADMIN_USER_IDS || "")
+    .split(/[\s,]+/)
+    .map((id) => id.trim())
+    .filter(Boolean),
+);
+
+function isAdminUser(userId) {
+  return ADMIN_USER_IDS.has(String(userId));
+}
+
+function formatReservationHealth(snapshot) {
+  const nowAlgeria = new Date().toLocaleString("fr-FR", {
+    timeZone: "Africa/Algiers",
+  });
+
+  const recentIssuesText = snapshot.recentIssues.length
+    ? snapshot.recentIssues
+        .map((item, index) => {
+          const run = item.lastRun || {};
+          return `${index + 1}. user ${item.ownerUserId} | ${run.status || "unknown"} | attempt ${run.attempt || 0}/2 | success ${run.successCount || 0} | failed ${run.failedCount || 0}`;
+        })
+        .join("\n")
+    : "None";
+
+  return [
+    "Reservation health",
+    `Now (Algeria): ${nowAlgeria}`,
+    `Encryption key configured: ${snapshot.encryptionConfigured ? "Yes" : "No"}`,
+    `Total profiles: ${snapshot.totalProfiles}`,
+    `Auto-enabled profiles: ${snapshot.autoEnabledProfiles}`,
+    `Active onboarding sessions: ${snapshot.onboardingSessions}`,
+    "",
+    `Today key: ${snapshot.todayKey}`,
+    `Today success: ${snapshot.todaySuccess}`,
+    `Today partial: ${snapshot.todayPartial}`,
+    `Today failed: ${snapshot.todayFailed}`,
+    `Pending retry (attempt < 2): ${snapshot.pendingRetry}`,
+    "",
+    "Recent non-success auto runs:",
+    recentIssuesText,
+  ].join("\n");
+}
+
+async function getReservationHealthSnapshot() {
+  const reservations = dbManager.getCollection("mealReservations");
+  const onboarding = dbManager.getCollection("mealReservationOnboarding");
+  const todayKey = getAlgeriaDateKey();
+
+  const [
+    totalProfiles,
+    autoEnabledProfiles,
+    onboardingSessions,
+    todaySuccess,
+    todayPartial,
+    todayFailed,
+    pendingRetry,
+    recentIssues,
+  ] = await Promise.all([
+    reservations.countDocuments({}),
+    reservations.countDocuments({ autoEnabled: true }),
+    onboarding.countDocuments({}),
+    reservations.countDocuments({
+      "lastRun.dayKey": todayKey,
+      "lastRun.status": "success",
+    }),
+    reservations.countDocuments({
+      "lastRun.dayKey": todayKey,
+      "lastRun.status": "partial",
+    }),
+    reservations.countDocuments({
+      "lastRun.dayKey": todayKey,
+      "lastRun.status": "failed",
+    }),
+    reservations.countDocuments({
+      autoEnabled: true,
+      "lastRun.dayKey": todayKey,
+      "lastRun.status": { $ne: "success" },
+      "lastRun.attempt": { $lt: 2 },
+    }),
+    reservations
+      .find({
+        autoEnabled: true,
+        "lastRun.dayKey": todayKey,
+        "lastRun.status": { $ne: "success" },
+      })
+      .sort({ updatedAt: -1 })
+      .limit(5)
+      .project({
+        ownerUserId: 1,
+        lastRun: 1,
+      })
+      .toArray(),
+  ]);
+
+  return {
+    encryptionConfigured: hasEncryptionKey(),
+    totalProfiles,
+    autoEnabledProfiles,
+    onboardingSessions,
+    todayKey,
+    todaySuccess,
+    todayPartial,
+    todayFailed,
+    pendingRetry,
+    recentIssues,
+  };
+}
+
+function normalizeBotCommand(text) {
+  const first = String(text || "")
+    .trim()
+    .split(/\s+/)[0]
+    .toLowerCase();
+  return first.replace("@tagallesisbabot", "");
+}
+
+function isPrivateChat(msg) {
+  return msg?.chat?.type === "private";
+}
+
+function mealTypesToText(mealTypes = []) {
+  const labels = mealTypes
+    .map((type) => MEAL_OPTIONS[type])
+    .filter(Boolean)
+    .join(", ");
+  return labels || "None";
+}
+
+function buildReserveModeKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        {
+          text: "Single account",
+          callback_data: "reserve:mode:single",
+        },
+      ],
+      [
+        {
+          text: "Chunk accounts",
+          callback_data: "reserve:mode:chunk",
+        },
+      ],
+      [{ text: "Cancel", callback_data: "reserve:cancel" }],
+    ],
+  };
+}
+
+function buildResidenceChoiceKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        {
+          text: "Cite 6 (default)",
+          callback_data: "reserve:residence:default",
+        },
+      ],
+      [
+        {
+          text: "Suggest from API",
+          callback_data: "reserve:residence:suggest",
+        },
+        {
+          text: "Manual residence",
+          callback_data: "reserve:residence:manual",
+        },
+      ],
+      [{ text: "Cancel", callback_data: "reserve:cancel" }],
+    ],
+  };
+}
+
+function buildChunkPartialKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        {
+          text: "Continue with valid",
+          callback_data: "reserve:chunk:continue",
+        },
+      ],
+      [
+        {
+          text: "Resend credentials",
+          callback_data: "reserve:chunk:resend",
+        },
+      ],
+      [{ text: "Cancel", callback_data: "reserve:cancel" }],
+    ],
+  };
+}
+
+function buildDepotKeyboard(candidates = []) {
+  const rows = candidates.map((item, index) => [
+    {
+      text: item.label,
+      callback_data: `reserve:depot:pick:${index}`,
+    },
+  ]);
+
+  rows.push([{ text: "Cancel", callback_data: "reserve:cancel" }]);
+
+  return { inline_keyboard: rows };
+}
+
+function buildMealSelectionKeyboard(selectedMeals = [1, 2, 3]) {
+  const has = (meal) => selectedMeals.includes(meal);
+
+  return {
+    inline_keyboard: [
+      [
+        {
+          text: `${has(1) ? "✅" : "⬜"} Breakfast`,
+          callback_data: "reserve:meal:1",
+        },
+        {
+          text: `${has(2) ? "✅" : "⬜"} Lunch`,
+          callback_data: "reserve:meal:2",
+        },
+      ],
+      [
+        {
+          text: `${has(3) ? "✅" : "⬜"} Dinner`,
+          callback_data: "reserve:meal:3",
+        },
+      ],
+      [
+        {
+          text: "Select all",
+          callback_data: "reserve:meal:all",
+        },
+        {
+          text: "Done",
+          callback_data: "reserve:meal:done",
+        },
+      ],
+      [{ text: "Cancel", callback_data: "reserve:cancel" }],
+    ],
+  };
+}
+
+function buildScheduleKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        {
+          text: "Tomorrow only",
+          callback_data: "reserve:schedule:once",
+        },
+      ],
+      [
+        {
+          text: "Auto daily (next 3 days)",
+          callback_data: "reserve:schedule:auto",
+        },
+      ],
+      [{ text: "Cancel", callback_data: "reserve:cancel" }],
+    ],
+  };
+}
+
+async function getReserveOnboarding(userId) {
+  const collection = dbManager.getCollection("mealReservationOnboarding");
+  return collection.findOne({ userId });
+}
+
+async function saveReserveOnboarding(userId, payload) {
+  const { _id, ...safePayload } = payload || {};
+  const collection = dbManager.getCollection("mealReservationOnboarding");
+  await collection.updateOne(
+    { userId },
+    {
+      $set: {
+        ...safePayload,
+        userId,
+        updatedAt: new Date(),
+      },
+      $setOnInsert: {
+        createdAt: new Date(),
+      },
+    },
+    { upsert: true },
+  );
+
+  return getReserveOnboarding(userId);
+}
+
+async function clearReserveOnboarding(userId) {
+  const collection = dbManager.getCollection("mealReservationOnboarding");
+  await collection.deleteOne({ userId });
+}
+
+async function getMealReservationProfile(userId) {
+  const collection = dbManager.getCollection("mealReservations");
+  return collection.findOne({ ownerUserId: userId });
+}
+
+async function upsertMealReservationProfile(userId, payload) {
+  const { _id, ...safePayload } = payload || {};
+  const collection = dbManager.getCollection("mealReservations");
+  await collection.updateOne(
+    { ownerUserId: userId },
+    {
+      $set: {
+        ...safePayload,
+        ownerUserId: userId,
+        updatedAt: new Date(),
+      },
+      $setOnInsert: {
+        createdAt: new Date(),
+      },
+    },
+    { upsert: true },
+  );
+
+  return getMealReservationProfile(userId);
+}
+
+async function saveMealReservationRun(userId, runData) {
+  const collection = dbManager.getCollection("mealReservations");
+  await collection.updateOne(
+    { ownerUserId: userId },
+    {
+      $set: {
+        lastRun: runData,
+        updatedAt: new Date(),
+      },
+    },
+  );
+}
+
+async function stopMealReservationAuto(userId) {
+  const collection = dbManager.getCollection("mealReservations");
+  const result = await collection.updateOne(
+    { ownerUserId: userId },
+    {
+      $set: {
+        autoEnabled: false,
+        updatedAt: new Date(),
+      },
+    },
+  );
+  return result.modifiedCount > 0;
+}
+
+async function askResidenceChoice(chatId) {
+  await bot.sendMessage(
+    chatId,
+    "Choose your residence setup:\n\n- Quick option: Cite 6 (wilaya 22, residence 0, depot 269)\n- Suggest from API: tries common residences and lets you pick by restaurant name\n- Manual: enter wilaya,residence and pick a restaurant",
+    {
+      reply_markup: buildResidenceChoiceKeyboard(),
+    },
+  );
+}
+
+async function askMealSelection(chatId, selectedMeals = [1, 2, 3]) {
+  await bot.sendMessage(chatId, "Pick meals (multi-select), then tap Done.", {
+    reply_markup: buildMealSelectionKeyboard(selectedMeals),
+  });
+}
+
+async function askScheduleMode(chatId) {
+  await bot.sendMessage(
+    chatId,
+    "Choose reservation mode:\n\n- Tomorrow only: reserve one day\n- Auto daily: every day at 23:00 Algeria, reserve next 3 days",
+    {
+      reply_markup: buildScheduleKeyboard(),
+    },
+  );
+}
+
+function formatReservationRunSummary(runResult) {
+  const lines = [];
+  lines.push(`Dates targeted: ${runResult.dateStrings.join(", ")}`);
+  lines.push(
+    `Accounts success: ${runResult.successCount}/${runResult.results.length}`,
+  );
+
+  const failed = runResult.results.filter((item) => !item.success);
+  if (failed.length > 0) {
+    lines.push("");
+    lines.push("Failed accounts:");
+    for (const item of failed) {
+      lines.push(`- ${maskIdentifier(item.username)}: ${item.error}`);
+    }
+  }
+
+  const successful = runResult.results.filter((item) => item.success);
+  if (successful.length > 0) {
+    lines.push("");
+    lines.push("Successful accounts:");
+    for (const item of successful) {
+      lines.push(
+        `- ${maskIdentifier(item.username)}: submitted ${item.submittedCount || 0}, already reserved ${item.skippedAsExisting || 0}`,
+      );
+    }
+  }
+
+  return lines.join("\n");
+}
+
+function formatReservationStatus(profile) {
+  if (!profile) {
+    return "No reservation profile found yet. Use /reserve in private chat to set it up.";
+  }
+
+  const residence = profile.residence || DEFAULT_RESIDENCE;
+  const accountLines = (profile.accounts || [])
+    .map(
+      (account, index) => `${index + 1}. ${maskIdentifier(account.username)}`,
+    )
+    .join("\n");
+
+  const lastRun = profile.lastRun
+    ? `${profile.lastRun.status} on ${new Date(
+        profile.lastRun.attemptedAt,
+      ).toLocaleString("fr-FR", {
+        timeZone: "Africa/Algiers",
+      })}`
+    : "No run yet";
+
+  return [
+    "Reservation status",
+    `Mode: ${profile.mode || "single"}`,
+    `Auto enabled: ${profile.autoEnabled ? "Yes" : "No"}`,
+    `Meals: ${mealTypesToText(profile.mealTypes || [1, 2, 3])}`,
+    `Residence: ${residence.label || "Custom"} (wilaya ${residence.wilaya}, residence ${residence.residence}, depot ${residence.idDepot})`,
+    "Accounts:",
+    accountLines || "No accounts",
+    `Last run: ${lastRun}`,
+  ].join("\n");
+}
+
+async function fetchDepotCandidatesForResidence(account, wilaya, residence) {
+  try {
+    const password = decryptSecret(account.passwordEncrypted);
+    const auth = await authenticateWebEtu(account.username, password);
+    if (!auth.ok) {
+      return {
+        ok: false,
+        error: `Failed to validate account before depot lookup: ${auth.error}`,
+        candidates: [],
+      };
+    }
+
+    const onou = await exchangeOnouToken({
+      uuid: auth.uuid,
+      webetuToken: auth.token,
+      wilaya,
+      residence,
+      idIndividu: auth.idIndividu,
+      idDia: auth.idDia,
+    });
+
+    if (!onou.ok) {
+      return {
+        ok: false,
+        error: `Could not open this residence: ${onou.error}`,
+        candidates: [],
+      };
+    }
+
+    const depots = await fetchDepots({
+      uuid: auth.uuid,
+      onouToken: onou.onouToken,
+      wilaya,
+      residence,
+    });
+
+    if (!depots.ok || depots.depots.length === 0) {
+      return {
+        ok: false,
+        error: depots.error || "No restaurants found for this residence",
+        candidates: [],
+      };
+    }
+
+    const candidates = depots.depots.map((depot) => ({
+      label: `${depot.depotLabel} (Depot ${depot.idDepot})`,
+      wilaya: String(wilaya),
+      residence: String(residence),
+      idDepot: Number(depot.idDepot),
+      depotLabel: depot.depotLabel,
+    }));
+
+    return { ok: true, candidates };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message || "Failed to fetch depots",
+      candidates: [],
+    };
+  }
+}
+
+async function verifyAndEncryptAccounts(accounts) {
+  const valid = [];
+  const invalid = [];
+
+  const seen = new Set();
+  for (const entry of accounts) {
+    const username = String(entry.username || "").trim();
+    const password = String(entry.password || "").trim();
+
+    if (!username || !password) {
+      invalid.push({
+        username: username || "(empty)",
+        error: "Missing username or password",
+      });
+      continue;
+    }
+
+    const key = username.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const auth = await authenticateWebEtu(username, password);
+    if (!auth.ok) {
+      invalid.push({ username, error: auth.error });
+      continue;
+    }
+
+    valid.push({
+      username,
+      passwordEncrypted: encryptSecret(password),
+    });
+  }
+
+  return { valid, invalid };
+}
+
+async function startReserveOnboarding(chatId, userId, isEdit = false) {
+  if (!hasEncryptionKey()) {
+    await bot.sendMessage(
+      chatId,
+      "Reservation setup is not available right now because encryption is not configured on the server.",
+    );
+    return;
+  }
+
+  await saveReserveOnboarding(userId, {
+    ownerChatId: chatId,
+    step: "pick_mode",
+    mode: null,
+    accounts: [],
+    pendingValidAccounts: [],
+    pendingInvalidAccounts: [],
+    depotCandidates: [],
+    mealTypes: [1, 2, 3],
+    residence: null,
+    tempUsername: null,
+  });
+
+  await bot.sendMessage(
+    chatId,
+    isEdit
+      ? "Updating your reservation profile. Current profile stays unchanged until this setup completes.\n\nYour passwords are encrypted before being stored in MongoDB.\n\nChoose account mode:"
+      : "Let us set up /reserve.\n\nYour passwords are encrypted before being stored in MongoDB.\n\nChoose account mode:",
+    {
+      reply_markup: buildReserveModeKeyboard(),
+    },
+  );
+}
+
+async function finalizeReserveConfiguration(
+  userId,
+  chatId,
+  state,
+  scheduleMode,
+) {
+  const autoEnabled = scheduleMode === "auto";
+  const reserveDaysAhead = autoEnabled ? 3 : 1;
+
+  const payload = {
+    ownerChatId: chatId,
+    mode: state.mode || "single",
+    accounts: state.accounts || [],
+    residence: state.residence || DEFAULT_RESIDENCE,
+    mealTypes:
+      Array.isArray(state.mealTypes) && state.mealTypes.length > 0
+        ? state.mealTypes
+        : [1, 2, 3],
+    autoEnabled,
+    reserveDaysAhead,
+  };
+
+  const profile = await upsertMealReservationProfile(userId, payload);
+
+  await bot.sendMessage(
+    chatId,
+    autoEnabled
+      ? "Profile saved. Running first auto reservation now (next 3 days)..."
+      : "Profile saved. Running reservation now for tomorrow...",
+  );
+
+  const runResult = await executeReservationForAccounts(profile, {
+    daysAhead: reserveDaysAhead,
+  });
+
+  await saveMealReservationRun(userId, {
+    status: runResult.overallStatus,
+    attemptedAt: new Date().toISOString(),
+    successCount: runResult.successCount,
+    failedCount: runResult.failedCount,
+    dateStrings: runResult.dateStrings,
+    results: runResult.results,
+  });
+
+  await clearReserveOnboarding(userId);
+
+  const modeText = autoEnabled
+    ? "Auto mode is enabled. Daily execution should run at 23:00 Algeria time and reserve next 3 days."
+    : "Tomorrow-only reservation is done. Auto mode is disabled.";
+
+  await bot.sendMessage(
+    chatId,
+    `${modeText}\n\n${formatReservationRunSummary(runResult)}\n\nUse /reservestatus to view profile, /reserveedit to change settings, /reservestop to disable auto mode.`,
+  );
+}
+
+async function handleReserveCommand(normalizedCommand, chatId, userId, msg) {
+  if (!isPrivateChat(msg)) {
+    await bot.sendMessage(
+      chatId,
+      "Reservation commands are available only in private chat with the bot. Please message me in DM.",
+    );
+    return;
+  }
+
+  if (normalizedCommand === "/reservecancel") {
+    await clearReserveOnboarding(userId);
+    await bot.sendMessage(chatId, "Reservation setup canceled.");
+    return;
+  }
+
+  if (normalizedCommand === "/reservestatus") {
+    const profile = await getMealReservationProfile(userId);
+    await bot.sendMessage(chatId, formatReservationStatus(profile));
+    return;
+  }
+
+  if (normalizedCommand === "/reservestop") {
+    const stopped = await stopMealReservationAuto(userId);
+    await bot.sendMessage(
+      chatId,
+      stopped
+        ? "Auto reservation has been disabled."
+        : "No active auto reservation profile found.",
+    );
+    return;
+  }
+
+  if (normalizedCommand === "/reserveedit") {
+    await startReserveOnboarding(chatId, userId, true);
+    return;
+  }
+
+  if (normalizedCommand === "/reserve") {
+    await startReserveOnboarding(chatId, userId, false);
+  }
+}
+
+async function handleReserveFlowText(msg, text) {
+  if (!isPrivateChat(msg)) return false;
+
+  const userId = msg.from.id;
+  const chatId = msg.chat.id;
+  const state = await getReserveOnboarding(userId);
+  if (!state) return false;
+
+  const normalizedCommand = normalizeBotCommand(text);
+  if (RESERVE_COMMANDS.has(normalizedCommand)) {
+    return false;
+  }
+
+  if (text.startsWith("/")) {
+    await bot.sendMessage(
+      chatId,
+      "You are in /reserve setup. Finish this step or use /reservecancel.",
+    );
+    return true;
+  }
+
+  if (state.step === "single_username") {
+    const username = text.trim();
+    if (!username) {
+      await bot.sendMessage(
+        chatId,
+        "Please send a valid WebEtu email/identifier.",
+      );
+      return true;
+    }
+
+    await saveReserveOnboarding(userId, {
+      ...state,
+      tempUsername: username,
+      step: "single_password",
+    });
+
+    await bot.sendMessage(
+      chatId,
+      "Now send your password. Do not worry, it will be encrypted before storage.",
+    );
+    return true;
+  }
+
+  if (state.step === "single_password") {
+    const password = text.trim();
+    if (!password) {
+      await bot.sendMessage(
+        chatId,
+        "Password cannot be empty. Please send it again.",
+      );
+      return true;
+    }
+
+    if (!state.tempUsername) {
+      await bot.sendMessage(
+        chatId,
+        "Session data is incomplete. Please restart with /reserve.",
+      );
+      await clearReserveOnboarding(userId);
+      return true;
+    }
+
+    await bot.sendMessage(chatId, "Verifying credentials...");
+    const auth = await authenticateWebEtu(state.tempUsername, password);
+    if (!auth.ok) {
+      await bot.sendMessage(
+        chatId,
+        `Credentials not valid for ${maskIdentifier(state.tempUsername)}. Error: ${auth.error}\n\nTry again or use /reservecancel.`,
+      );
+      return true;
+    }
+
+    await saveReserveOnboarding(userId, {
+      ...state,
+      mode: "single",
+      accounts: [
+        {
+          username: state.tempUsername,
+          passwordEncrypted: encryptSecret(password),
+        },
+      ],
+      tempUsername: null,
+      mealTypes: [1, 2, 3],
+      step: "pick_residence",
+    });
+
+    await askResidenceChoice(chatId);
+    return true;
+  }
+
+  if (state.step === "chunk_credentials") {
+    const parsed = parseChunkCredentials(text);
+
+    if (parsed.validEntries.length === 0) {
+      await bot.sendMessage(
+        chatId,
+        "No valid account format found.\nUse one per line or comma-separated: username:password",
+      );
+      return true;
+    }
+
+    await bot.sendMessage(chatId, "Verifying chunk credentials...");
+    const verification = await verifyAndEncryptAccounts(parsed.validEntries);
+
+    if (verification.valid.length === 0) {
+      const invalidLines = verification.invalid
+        .map((item) => `- ${maskIdentifier(item.username)}: ${item.error}`)
+        .join("\n");
+
+      await bot.sendMessage(
+        chatId,
+        `None of the provided accounts were valid.\n\n${invalidLines}\n\nPlease resend chunk credentials.`,
+      );
+      return true;
+    }
+
+    if (verification.invalid.length > 0 || parsed.invalidEntries.length > 0) {
+      const invalidFromFormat = parsed.invalidEntries.map(
+        (item) => `- ${item} (invalid format)`,
+      );
+      const invalidFromAuth = verification.invalid.map(
+        (item) => `- ${maskIdentifier(item.username)}: ${item.error}`,
+      );
+
+      await saveReserveOnboarding(userId, {
+        ...state,
+        mode: "chunk",
+        pendingValidAccounts: verification.valid,
+        pendingInvalidAccounts: [...invalidFromFormat, ...invalidFromAuth],
+        step: "chunk_confirm_partial",
+      });
+
+      await bot.sendMessage(
+        chatId,
+        `Some accounts failed:\n${[...invalidFromFormat, ...invalidFromAuth].join("\n")}\n\nContinue with valid accounts or resend all credentials?`,
+        {
+          reply_markup: buildChunkPartialKeyboard(),
+        },
+      );
+      return true;
+    }
+
+    await saveReserveOnboarding(userId, {
+      ...state,
+      mode: "chunk",
+      accounts: verification.valid,
+      mealTypes: [1, 2, 3],
+      step: "pick_residence",
+    });
+    await askResidenceChoice(chatId);
+    return true;
+  }
+
+  if (state.step === "manual_residence_input") {
+    const parts = text
+      .split(",")
+      .map((part) => part.trim())
+      .filter(Boolean);
+
+    if (parts.length !== 2 && parts.length !== 3) {
+      await bot.sendMessage(
+        chatId,
+        "Invalid format. Send wilaya,residence OR wilaya,residence,idDepot\nExample: 22,0 OR 22,0,269",
+      );
+      return true;
+    }
+
+    const [wilaya, residence, idDepotRaw] = parts;
+    if (!wilaya || !residence) {
+      await bot.sendMessage(chatId, "Wilaya and residence are required.");
+      return true;
+    }
+
+    if (parts.length === 3) {
+      const idDepot = Number(idDepotRaw);
+      if (!Number.isFinite(idDepot) || idDepot <= 0) {
+        await bot.sendMessage(
+          chatId,
+          "Invalid idDepot. Please send a numeric value.",
+        );
+        return true;
+      }
+
+      await saveReserveOnboarding(userId, {
+        ...state,
+        residence: {
+          label: `Custom ${wilaya}/${residence}`,
+          wilaya,
+          residence,
+          idDepot,
+          depotLabel: `Depot ${idDepot}`,
+        },
+        mealTypes: state.mealTypes?.length ? state.mealTypes : [1, 2, 3],
+        step: "pick_meals",
+      });
+
+      await askMealSelection(
+        chatId,
+        state.mealTypes?.length ? state.mealTypes : [1, 2, 3],
+      );
+      return true;
+    }
+
+    const baseAccount = state.accounts?.[0];
+    if (!baseAccount) {
+      await bot.sendMessage(
+        chatId,
+        "No account available for depot lookup. Restart with /reserve.",
+      );
+      await clearReserveOnboarding(userId);
+      return true;
+    }
+
+    await bot.sendMessage(
+      chatId,
+      "Looking up restaurants for this residence...",
+    );
+    const lookup = await fetchDepotCandidatesForResidence(
+      baseAccount,
+      wilaya,
+      residence,
+    );
+
+    if (!lookup.ok || lookup.candidates.length === 0) {
+      await bot.sendMessage(
+        chatId,
+        `${lookup.error || "No restaurant options found"}.\nYou can still send wilaya,residence,idDepot manually.`,
+      );
+      return true;
+    }
+
+    await saveReserveOnboarding(userId, {
+      ...state,
+      depotCandidates: lookup.candidates,
+      step: "pick_depot",
+    });
+
+    await bot.sendMessage(chatId, "Pick your restaurant:", {
+      reply_markup: buildDepotKeyboard(lookup.candidates),
+    });
+    return true;
+  }
+
+  await bot.sendMessage(
+    chatId,
+    "Please use the provided buttons, or /reservecancel to stop setup.",
+  );
+  return true;
+}
+
+async function handleReserveCallback(callbackQuery) {
+  const data = callbackQuery.data || "";
+  if (!data.startsWith("reserve:")) return false;
+
+  try {
+    await bot.answerCallbackQuery(callbackQuery.id);
+  } catch (_) {
+    // ignore callback timeout
+  }
+
+  const msg = callbackQuery.message;
+  const chatId = msg.chat.id;
+  const userId = callbackQuery.from.id;
+
+  if (!isPrivateChat(msg)) {
+    await bot.sendMessage(
+      chatId,
+      "Reservation setup is private-only. Please continue in DM with the bot.",
+    );
+    return true;
+  }
+
+  if (data === "reserve:cancel") {
+    await clearReserveOnboarding(userId);
+    await bot.sendMessage(chatId, "Reservation setup canceled.");
+    return true;
+  }
+
+  const state = await getReserveOnboarding(userId);
+  if (!state) {
+    await bot.sendMessage(
+      chatId,
+      "Setup session expired. Send /reserve to start again.",
+    );
+    return true;
+  }
+
+  if (data === "reserve:mode:single") {
+    await saveReserveOnboarding(userId, {
+      ...state,
+      mode: "single",
+      mealTypes: [1, 2, 3],
+      step: "single_username",
+    });
+    await bot.sendMessage(chatId, "Send your WebEtu email/identifier:");
+    return true;
+  }
+
+  if (data === "reserve:mode:chunk") {
+    await saveReserveOnboarding(userId, {
+      ...state,
+      mode: "chunk",
+      mealTypes: [1, 2, 3],
+      step: "chunk_credentials",
+    });
+    await bot.sendMessage(
+      chatId,
+      "Send chunk credentials in one message.\nFormat accepted:\n- One per line: username:password\n- Or comma-separated: user1:pass1, user2:pass2",
+    );
+    return true;
+  }
+
+  if (data === "reserve:chunk:continue") {
+    if (
+      state.step !== "chunk_confirm_partial" ||
+      !Array.isArray(state.pendingValidAccounts) ||
+      state.pendingValidAccounts.length === 0
+    ) {
+      await bot.sendMessage(
+        chatId,
+        "No valid chunk accounts available to continue.",
+      );
+      return true;
+    }
+
+    await saveReserveOnboarding(userId, {
+      ...state,
+      accounts: state.pendingValidAccounts,
+      pendingValidAccounts: [],
+      pendingInvalidAccounts: [],
+      step: "pick_residence",
+    });
+
+    await askResidenceChoice(chatId);
+    return true;
+  }
+
+  if (data === "reserve:chunk:resend") {
+    await saveReserveOnboarding(userId, {
+      ...state,
+      pendingValidAccounts: [],
+      pendingInvalidAccounts: [],
+      step: "chunk_credentials",
+    });
+    await bot.sendMessage(
+      chatId,
+      "Please resend chunk credentials in username:password format.",
+    );
+    return true;
+  }
+
+  if (data === "reserve:residence:default") {
+    await saveReserveOnboarding(userId, {
+      ...state,
+      residence: DEFAULT_RESIDENCE,
+      mealTypes: state.mealTypes?.length ? state.mealTypes : [1, 2, 3],
+      step: "pick_meals",
+    });
+    await askMealSelection(
+      chatId,
+      state.mealTypes?.length ? state.mealTypes : [1, 2, 3],
+    );
+    return true;
+  }
+
+  if (data === "reserve:residence:manual") {
+    await saveReserveOnboarding(userId, {
+      ...state,
+      step: "manual_residence_input",
+    });
+    await bot.sendMessage(
+      chatId,
+      "Send residence info as:\n- wilaya,residence\n- or wilaya,residence,idDepot\n\nExample: 22,0 or 22,0,269",
+    );
+    return true;
+  }
+
+  if (data === "reserve:residence:suggest") {
+    const baseAccount = state.accounts?.[0];
+    if (!baseAccount) {
+      await bot.sendMessage(
+        chatId,
+        "No verified account found. Restart with /reserve.",
+      );
+      await clearReserveOnboarding(userId);
+      return true;
+    }
+
+    await bot.sendMessage(chatId, "Fetching residence suggestions from API...");
+
+    let password;
+    try {
+      password = decryptSecret(baseAccount.passwordEncrypted);
+    } catch (error) {
+      await bot.sendMessage(
+        chatId,
+        `Could not read encrypted credentials: ${error.message}`,
+      );
+      await clearReserveOnboarding(userId);
+      return true;
+    }
+
+    const suggestionsResult = await fetchResidenceSuggestions({
+      username: baseAccount.username,
+      password,
+      wilaya: "22",
+      maxSuggestions: 8,
+    });
+
+    if (!suggestionsResult.ok || suggestionsResult.suggestions.length === 0) {
+      await bot.sendMessage(
+        chatId,
+        `${suggestionsResult.error || "No suggestions available"}. You can pick manual residence instead.`,
+      );
+      return true;
+    }
+
+    const candidates = suggestionsResult.suggestions.map((item) => ({
+      label: item.label,
+      wilaya: item.wilaya,
+      residence: item.residence,
+      idDepot: item.idDepot,
+      depotLabel: item.depotLabel,
+    }));
+
+    await saveReserveOnboarding(userId, {
+      ...state,
+      depotCandidates: candidates,
+      step: "pick_depot",
+    });
+
+    await bot.sendMessage(chatId, "Choose one suggested restaurant:", {
+      reply_markup: buildDepotKeyboard(candidates),
+    });
+    return true;
+  }
+
+  if (data.startsWith("reserve:depot:pick:")) {
+    if (
+      !Array.isArray(state.depotCandidates) ||
+      state.depotCandidates.length === 0
+    ) {
+      await bot.sendMessage(
+        chatId,
+        "No depot options found in session. Restart with /reserve.",
+      );
+      return true;
+    }
+
+    const index = Number(data.split(":").pop());
+    if (
+      !Number.isInteger(index) ||
+      index < 0 ||
+      index >= state.depotCandidates.length
+    ) {
+      await bot.sendMessage(chatId, "Invalid restaurant selection.");
+      return true;
+    }
+
+    const selected = state.depotCandidates[index];
+    await saveReserveOnboarding(userId, {
+      ...state,
+      residence: {
+        label: selected.label,
+        wilaya: selected.wilaya,
+        residence: selected.residence,
+        idDepot: selected.idDepot,
+        depotLabel: selected.depotLabel,
+      },
+      mealTypes: state.mealTypes?.length ? state.mealTypes : [1, 2, 3],
+      step: "pick_meals",
+    });
+
+    await askMealSelection(
+      chatId,
+      state.mealTypes?.length ? state.mealTypes : [1, 2, 3],
+    );
+    return true;
+  }
+
+  if (data === "reserve:meal:all") {
+    await saveReserveOnboarding(userId, {
+      ...state,
+      mealTypes: [1, 2, 3],
+      step: "pick_meals",
+    });
+    await askMealSelection(chatId, [1, 2, 3]);
+    return true;
+  }
+
+  if (["reserve:meal:1", "reserve:meal:2", "reserve:meal:3"].includes(data)) {
+    const mealType = Number(data.split(":").pop());
+    const current = Array.isArray(state.mealTypes)
+      ? [...state.mealTypes]
+      : [1, 2, 3];
+
+    const index = current.indexOf(mealType);
+    if (index >= 0) {
+      current.splice(index, 1);
+    } else {
+      current.push(mealType);
+    }
+
+    current.sort((a, b) => a - b);
+
+    await saveReserveOnboarding(userId, {
+      ...state,
+      mealTypes: current,
+      step: "pick_meals",
+    });
+    await askMealSelection(chatId, current);
+    return true;
+  }
+
+  if (data === "reserve:meal:done") {
+    const selected = Array.isArray(state.mealTypes) ? state.mealTypes : [];
+    if (selected.length === 0) {
+      await bot.sendMessage(
+        chatId,
+        "Please select at least one meal before continuing.",
+      );
+      await askMealSelection(chatId, selected);
+      return true;
+    }
+
+    await saveReserveOnboarding(userId, {
+      ...state,
+      step: "pick_schedule",
+    });
+    await askScheduleMode(chatId);
+    return true;
+  }
+
+  if (data === "reserve:schedule:once" || data === "reserve:schedule:auto") {
+    const mode = data.endsWith(":auto") ? "auto" : "once";
+
+    if (!Array.isArray(state.accounts) || state.accounts.length === 0) {
+      await bot.sendMessage(
+        chatId,
+        "No accounts found in setup. Restart with /reserve.",
+      );
+      await clearReserveOnboarding(userId);
+      return true;
+    }
+
+    if (!state.residence) {
+      await bot.sendMessage(
+        chatId,
+        "No residence selected. Restart with /reserve.",
+      );
+      await clearReserveOnboarding(userId);
+      return true;
+    }
+
+    await finalizeReserveConfiguration(userId, chatId, state, mode);
+    return true;
+  }
+
+  await bot.sendMessage(
+    chatId,
+    "Unknown reservation action. Use /reserve to restart.",
+  );
+  return true;
+}
+
 async function spinWheel(chatId, options) {
   const winner = options[Math.floor(Math.random() * options.length)];
 
@@ -1378,10 +2636,10 @@ async function checkGeminiAPIStatus() {
 }
 
 const commands = [
-  { command: "mentionall", description: "Mention all members in the group" },
-  { command: "join", description: "Join the group" },
+  { command: "everyone", description: "Tag all members in the group" },
   { command: "leave", description: "Leave the group" },
   { command: "showmembers", description: "Show all members in the group" },
+
   { command: "help", description: "Seek help from one of the helpers" },
   { command: "addtohelp", description: "Join helpers list" },
   { command: "showhelpers", description: "Show all helpers in the group" },
@@ -1398,6 +2656,30 @@ const commands = [
   {
     command: "clearreminder",
     description: "Clear reminders by index (comma-separated)",
+  },
+  {
+    command: "reserve",
+    description: "Setup meal reservation (private chat only)",
+  },
+  {
+    command: "reserveedit",
+    description: "Edit meal reservation profile",
+  },
+  {
+    command: "reservestatus",
+    description: "Show your meal reservation settings",
+  },
+  {
+    command: "reservestop",
+    description: "Disable auto meal reservation",
+  },
+  {
+    command: "reservecancel",
+    description: "Cancel current reservation setup",
+  },
+  {
+    command: "reservehealth",
+    description: "Admin: reservation system health snapshot",
   },
   // AI Commands
   { command: "ask", description: "Ask AI a question" },
@@ -1467,6 +2749,12 @@ initializeBot().catch(console.error);
 async function staticCommands(text, chatId, userId, msg) {
   try {
     const sanitizedText = sanitizeInput(text);
+    const normalizedCommand = normalizeBotCommand(sanitizedText);
+
+    if (RESERVE_COMMANDS.has(normalizedCommand)) {
+      await handleReserveCommand(normalizedCommand, chatId, userId, msg);
+      return;
+    }
 
     if (
       sanitizedText === "/start" ||
@@ -1703,6 +2991,32 @@ async function staticCommands(text, chatId, userId, msg) {
         "🗑️ **Reminders cleared!** All reminders have been deleted. ✨",
         { parse_mode: "Markdown" },
       );
+    }
+
+    if (
+      sanitizedText === "/reservehealth" ||
+      sanitizedText === "/reservehealth@tagallesisbabot"
+    ) {
+      if (ADMIN_USER_IDS.size === 0) {
+        await bot.sendMessage(
+          chatId,
+          "Reservation health check is disabled because ADMIN_USER_IDS is not configured on the server.",
+        );
+        return;
+      }
+
+      if (!isAdminUser(userId)) {
+        await bot.sendMessage(
+          chatId,
+          "You are not allowed to use this command.",
+        );
+        return;
+      }
+
+      await bot.sendChatAction(chatId, "typing");
+      const snapshot = await getReservationHealthSnapshot();
+      await bot.sendMessage(chatId, formatReservationHealth(snapshot));
+      return;
     }
 
     // AI Commands
@@ -2311,10 +3625,21 @@ export default async function handler(event) {
     const bodyString = await readStream(event.body);
     const body = JSON.parse(bodyString);
 
-    // Handle inline keyboard callbacks (e.g. game buttons)
+    // Handle inline keyboard callbacks
     const callbackQuery = body.callback_query;
     if (callbackQuery) {
-      await handleGameCallback(callbackQuery);
+      if (callbackQuery.data?.startsWith("reserve:")) {
+        await handleReserveCallback(callbackQuery);
+      } else if (callbackQuery.data?.startsWith("game_")) {
+        await handleGameCallback(callbackQuery);
+      } else {
+        try {
+          await bot.answerCallbackQuery(callbackQuery.id);
+        } catch (_) {
+          // ignore callback timeout
+        }
+      }
+
       return new Response(JSON.stringify({ ok: true }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
@@ -2359,6 +3684,15 @@ export default async function handler(event) {
         groupData.members.push({ id: userId, first_name: msg.from.first_name });
         await updateGroupMembers(chatId, groupData.members);
       }
+    }
+
+    // Handle /reserve state machine text replies first
+    const reserveFlowHandled = await handleReserveFlowText(msg, text);
+    if (reserveFlowHandled) {
+      return new Response(
+        JSON.stringify({ message: "Reserve flow message processed" }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
     }
 
     // Handle static commands first
