@@ -629,9 +629,7 @@ export async function reserveMeals({
     };
   }
 
-  const details = detailObjects.map((obj) =>
-    JSON.stringify(obj, null, 0),
-  );
+  const details = detailObjects.map((obj) => JSON.stringify(obj, null, 0));
   const payload = {
     uuid,
     wilaya: String(wilaya),
