@@ -211,7 +211,7 @@ export async function authenticateWebEtu(username, password) {
       method: "POST",
       headers: createWebEtuHeaders({ body: loginBody }),
       body: loginBody,
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(15000),
     });
 
     const raw = await response.text();
@@ -302,7 +302,7 @@ export async function exchangeOnouToken({
         idIndividu,
         idDia,
       }),
-      signal: AbortSignal.timeout(6000),
+      signal: AbortSignal.timeout(20000),
     });
 
     const raw = await response.text();
@@ -435,7 +435,7 @@ export async function fetchDepots({ uuid, onouToken, wilaya, residence }) {
     const response = await fetch(url, {
       method: "GET",
       headers: createOnouHeaders({ onouToken }),
-      signal: AbortSignal.timeout(6000),
+      signal: AbortSignal.timeout(20000),
     });
 
     const raw = await response.text();
@@ -497,7 +497,7 @@ export async function fetchCurrentReservations({
     const response = await fetch(url, {
       method: "GET",
       headers: createOnouHeaders({ onouToken }),
-      signal: AbortSignal.timeout(6000),
+      signal: AbortSignal.timeout(20000),
     });
 
     const raw = await response.text();
@@ -629,22 +629,24 @@ export async function reserveMeals({
     };
   }
 
+  const details = detailObjects.map((obj) =>
+    JSON.stringify(obj, null, 0),
+  );
   const payload = {
     uuid,
     wilaya: String(wilaya),
     residence: String(residence),
     token: onouToken,
-    details: detailObjects.map((obj) => JSON.stringify(obj)),
+    details,
   };
-
-  const payloadJson = JSON.stringify(payload);
+  const payloadJson = JSON.stringify(payload, null, 0);
 
   try {
     const response = await fetch(`${ONOU_BASE}/api/reservemeal`, {
       method: "POST",
       headers: createOnouHeaders({ onouToken, body: payloadJson }),
       body: payloadJson,
-      signal: AbortSignal.timeout(6000),
+      signal: AbortSignal.timeout(20000),
     });
 
     const raw = await response.text();
@@ -766,7 +768,7 @@ export async function fetchResidenceSuggestions({
   ];
 
   const suggestions = [];
-  const promises = residenceCandidates.map(async (residence) => {
+  const processResidence = async (residence) => {
     try {
       const onou = await exchangeOnouToken({
         uuid: auth.uuid,
@@ -777,7 +779,7 @@ export async function fetchResidenceSuggestions({
         idDia: auth.idDia,
       });
 
-      if (!onou.ok) return;
+      if (!onou.ok) return [];
 
       const depotsResult = await fetchDepots({
         uuid: auth.uuid,
@@ -786,26 +788,45 @@ export async function fetchResidenceSuggestions({
         residence,
       });
 
-      if (!depotsResult.ok || depotsResult.depots.length === 0) return;
+      if (!depotsResult.ok || depotsResult.depots.length === 0) return [];
 
-      for (const depot of depotsResult.depots) {
-        suggestions.push({
-          label: `${depot.depotLabel} (Res ${residence})`,
-          wilaya,
-          residence,
-          idDepot: depot.idDepot,
-          depotLabel: depot.depotLabel,
-        });
-      }
+      return depotsResult.depots.map((depot) => ({
+        label: `${depot.depotLabel} (Res ${residence})`,
+        wilaya,
+        residence,
+        idDepot: depot.idDepot,
+        depotLabel: depot.depotLabel,
+      }));
     } catch (e) {
       console.log(
         `[RESERVE] fetchResidenceSuggestions error for res ${residence}`,
         e.message,
       );
+      return [];
     }
-  });
+  };
 
-  await Promise.all(promises);
+  for (let i = 0; i < residenceCandidates.length; i += 3) {
+    const batch = residenceCandidates.slice(i, i + 3);
+    const batchResults = await Promise.all(batch.map(processResidence));
+
+    for (const residenceSuggestions of batchResults) {
+      for (const suggestion of residenceSuggestions) {
+        if (suggestions.length >= maxSuggestions) {
+          break;
+        }
+        suggestions.push(suggestion);
+      }
+
+      if (suggestions.length >= maxSuggestions) {
+        break;
+      }
+    }
+
+    if (suggestions.length >= maxSuggestions) {
+      break;
+    }
+  }
 
   // Limit suggestions and sort by residence for consistency
   suggestions.sort((a, b) => Number(a.residence) - Number(b.residence));
