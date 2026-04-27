@@ -2875,8 +2875,8 @@ async function staticCommands(text, chatId, userId, msg) {
     }
 
     if (
-      sanitizedText === "/mentionall" ||
-      sanitizedText === "/mentionall@tagallesisbabot"
+      sanitizedText === "/everyone" ||
+      sanitizedText === "/everyone@tagallesisbabot"
     ) {
       const groupData = await getGroupMembers(chatId);
       const mentions = groupData.members.map(
